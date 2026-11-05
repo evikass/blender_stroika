@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-coral_gn.py — v10 «blender_stroika»
-Процедурный коралл по референсу Qwen21_00002.png:
-  низ — пухлое основание с сотовыми ямками,
+coral_gn.py — v11 «blender_stroika»
+Процедурный коралл по референсам Qwen21_00002.png + Qwen21_00015/00020.png:
+  низ — пухлое основание с НАСТОЯЩИМИ губчатыми дырками (Boolean Difference
+        со сферами: сквозные поры с чистой круглой кромкой, как у губки),
   середина — гладкая скрученная талия,
   верх — два веера с радиальными складками и мелкими ровными дырочками.
+
+Толщина стенки (= глубина пор) заложена в базовую сетку (сдвиг профиля),
+env CORAL_WALL (по умолчанию 0.024). Сферы-резаки НЕ перекрываются
+(spacing ≥ 2·r_max), иначе FLOAT-солвер boolean даёт кольца-шрамы.
 
 Архитектура: Python-базовая сетка (тело вращения) + модификатор CoralGN (Geometry Nodes).
 Конвенция хелперов: скалярные/векторные хелперы возвращают (node, socket);
@@ -192,26 +197,60 @@ def sample_profile(rings):
 
 
 def build_base_mesh(name='CoralBase'):
+    """ЗАМКНУТЫЙ СОЛИД: внешняя поверхность + внутренняя (сдвиг профиля на
+    CORAL_WALL по 2D-нормали) + швы снизу/сверху. Стенка = глубина губчатых пор.
+    Boolean сфер против солида — стандартный случай (на открытой оболочке
+    exact-boolean в 5.3 съедает всю память — проверено, OOM-kill)."""
+    wall = float(os.environ.get('CORAL_WALL', '0.024'))
     mesh = bpy.data.meshes.new(name)
     bm = bmesh.new()
     prof = sample_profile(RINGS)
+    n = len(prof)
+
+    def n2d(i):
+        a = prof[max(i - 1, 0)]; b = prof[min(i + 1, n - 1)]
+        tr, tz = b[0] - a[0], b[1] - a[1]
+        l = math.hypot(tr, tz) or 1.0
+        return (tz / l, -tr / l)
+
+    prof_in = []
+    for i, (r, z) in enumerate(prof):
+        nx, nz = n2d(i)
+        prof_in.append((max(0.012, r - wall * nx),
+                        max(0.004, z - wall * nz)))
     grid = []
-    for (r, z) in prof:
-        ring = []
+    for (r, z), (ri, zi) in zip(prof, prof_in):
+        ro = []; rn = []
         for j in range(SEGS):
             a = 2 * pi * j / SEGS
-            ring.append(bm.verts.new((r * cos(a), r * sin(a), z)))
-        grid.append(ring)
+            ca, sa = cos(a), sin(a)
+            ro.append(bm.verts.new((r * ca, r * sa, z)))
+            rn.append(bm.verts.new((ri * ca, ri * sa, zi)))
+        grid.append((ro, rn))
     bm.verts.ensure_lookup_table()
-    for i in range(len(grid) - 1):
+    for i in range(n - 1):          # внешняя стенка
         for j in range(SEGS):
             j2 = (j + 1) % SEGS
-            bm.faces.new((grid[i][j], grid[i][j2], grid[i + 1][j2], grid[i + 1][j]))
-    # дно: полюс-веер
+            bm.faces.new((grid[i][0][j], grid[i][0][j2],
+                          grid[i + 1][0][j2], grid[i + 1][0][j]))
+    for i in range(n - 1):          # внутренняя стенка
+        for j in range(SEGS):
+            j2 = (j + 1) % SEGS
+            bm.faces.new((grid[i][1][j], grid[i + 1][1][j],
+                          grid[i + 1][1][j2], grid[i][1][j2]))
+    for j in range(SEGS):           # швы низ/верх
+        j2 = (j + 1) % SEGS
+        bm.faces.new((grid[0][0][j], grid[0][1][j],
+                      grid[0][1][j2], grid[0][0][j2]))
+        bm.faces.new((grid[n - 1][0][j], grid[n - 1][0][j2],
+                      grid[n - 1][1][j2], grid[n - 1][1][j]))
+    # дно: внешняя крышка (полюс) + внутренняя крышка полости
     c = bm.verts.new((0.0, 0.0, 0.0))
+    ci = bm.verts.new((0.0, 0.0, grid[0][1][0].co.z))
     for j in range(SEGS):
         j2 = (j + 1) % SEGS
-        bm.faces.new((c, grid[0][j2], grid[0][j]))
+        bm.faces.new((c, grid[0][0][j2], grid[0][0][j]))
+        bm.faces.new((ci, grid[0][1][j], grid[0][1][j2]))
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     bm.to_mesh(mesh)
     bm.free()
@@ -229,16 +268,15 @@ SOCKETS = [
     ('Fan Spread',      'NodeSocketFloat', 0.62, 0.0, 1.5),
     ('Fan Curl',        'NodeSocketFloat', 0.30, 0.0, 1.2),
     ('Gap Rise',        'NodeSocketFloat', 0.25, 0.0, 0.6),
-    ('Fan Start',       'NodeSocketFloat', 0.92, 0.6, 1.3),
     ('Lobe Sharp',      'NodeSocketFloat', 4.2, 0.5, 6.0),
     ('Pleat Count',     'NodeSocketFloat', 36.0, 0.0, 120.0),
     ('Pleat Depth',     'NodeSocketFloat', 0.040, 0.0, 0.1),
-    ('Holes Enable',    'NodeSocketFloat', 1.0, 0.0, 1.0),
-    ('Hole Spacing',    'NodeSocketFloat', 0.105, 0.04, 0.3),
-    ('Hole Radius',     'NodeSocketFloat', 0.062, 0.005, 0.09),
-    ('Hole Depth',      'NodeSocketFloat', 0.050, 0.0, 0.08),
-    ('Hole Var',        'NodeSocketFloat', 0.70, 0.0, 1.0),
-    ('Top Hole Radius', 'NodeSocketFloat', 0.024, 0.005, 0.05),
+    ('Pores Enable',    'NodeSocketFloat', 1.0, 0.0, 1.0),
+    ('Pore Spacing',    'NodeSocketFloat', 0.088, 0.04, 0.3),
+    ('Pore Radius',     'NodeSocketFloat', 0.030, 0.005, 0.09),
+    ('Pore Var',        'NodeSocketFloat', 0.75, 0.0, 1.0),
+    ('Fine Spacing',    'NodeSocketFloat', 0.066, 0.02, 0.2),
+    ('Fine Radius',     'NodeSocketFloat', 0.024, 0.005, 0.05),
     ('Smooth',          'NodeSocketInt',   4, 0, 24),
     ('Cutter Scale',    'NodeSocketFloat', 1.0, 0.1, 5.0),
     ('Cutter Object',   'NodeSocketObject', None, None, None),
@@ -341,68 +379,79 @@ def build_gn(name='CoralGN'):
                                  g.m('ADD', y3, (psp, 'Y')), znew))
     stages['lobes'] = cur
 
-    # ---- HOLES: регулярная шахматная решётка ямок (соты) ----
+    # ---- PORES: настоящие губчатые дырки — Boolean Difference со сферами ----
     p4 = pos_in(g); se4 = g.sep(p4)
     x4, y4, z4 = (se4, 'X'), (se4, 'Y'), (se4, 'Z')
-    sp = S('Hole Spacing')
-    lay = g.m('FLOOR', g.m('DIVIDE', z4, sp))
-    par = g.m('MODULO', lay, 2.0)
-    stg = g.m('MULTIPLY', par, g.m('MULTIPLY', sp, 0.5))
-
-    def cellcenter(coord, stg_):
-        ix = g.m('FLOOR', g.m('DIVIDE', g.m('SUBTRACT', coord, stg_), sp))
-        return g.m('ADD', g.m('MULTIPLY', ix, sp),
-                   g.m('ADD', g.m('MULTIPLY', sp, 0.5), stg_))
-
-    cc = g.comb(cellcenter(x4, stg), cellcenter(y4, stg),
-                g.m('ADD', g.m('MULTIPLY', lay, sp), g.m('MULTIPLY', sp, 0.5)))
-    # dst = |cc - p| — чистая float-математика (DISTANCE в 5.3 молча даёт 0.5)
-    ccs = g.sep(cc)
-    cx_, cy_, cz_ = (ccs, 'X'), (ccs, 'Y'), (ccs, 'Z')
-    dx_ = g.m('SUBTRACT', cx_, x4)
-    dy_ = g.m('SUBTRACT', cy_, y4)
-    dz_ = g.m('SUBTRACT', cz_, z4)
-    dst = g.m('POWER', g.m('ADD', g.m('ADD', g.m('MULTIPLY', dx_, dx_),
-                                       g.m('MULTIPLY', dy_, dy_)),
-                           g.m('MULTIPLY', dz_, dz_)), 0.5)
-    # псевдослучай на ячейку
-    frr = g.vec('FRACTION', g.vec('ADD', cc, g.v3(7.31, 3.77, 9.13)))
-    frs = g.sep(frr)
-    fr1 = g.m('ABSOLUTE', (frs, 'X'))
-    fr2 = g.m('ABSOLUTE', (frs, 'Y'))
-    # локальный радиус/глубина низа: *(0.55 + 0.9*fr*Var)
-    rb = g.m('MULTIPLY', fr1, S('Hole Var'))
-    rb = g.m('ADD', 0.55, g.m('MULTIPLY', rb, 0.9))
-    r_lo = g.m('MULTIPLY', S('Hole Radius'), rb)
-    t1 = g.m('SUBTRACT', 1.0, g.m('DIVIDE', dst, r_lo), clamp=True)
-    prof1 = g.smooth(t1, 0.0, 1.0)
-    db = g.m('MULTIPLY', prof1, S('Hole Depth'))
-    dd = g.m('MULTIPLY', fr2, S('Hole Var'))
-    dd = g.m('ADD', 0.55, g.m('MULTIPLY', dd, 0.9))
-    db = g.m('MULTIPLY', db, dd)
-    m_b1 = g.smooth(z4, 0.02, 0.10)
-    m_b2 = g.m('SUBTRACT', 1.0, g.smooth(z4, 0.66, 0.98))
-    m_bot = g.m('MULTIPLY', m_b1, m_b2)
-    off_b = g.m('MULTIPLY', db, m_bot)
-    # мелкие дырочки на веерах (у кромки)
     ln4 = g.m('POWER', g.m('ADD', g.m('MULTIPLY', x4, x4),
                            g.m('MULTIPLY', y4, y4)), 0.5)
-    m_t1 = g.smooth(z4, 1.00, 1.20)
-    m_t2 = g.smooth(ln4, 0.45, 0.55)
-    m_t3 = g.m('SUBTRACT', 1.0, g.smooth(ln4, 0.98, 1.15))
-    m_top = g.m('MULTIPLY', m_t1, m_t2)
-    m_top = g.m('MULTIPLY', m_top, m_t3)
-    rt = g.m('MULTIPLY', S('Top Hole Radius'), g.m('ADD', 0.6, g.m('MULTIPLY', fr1, 0.8)))
-    t2_ = g.m('SUBTRACT', 1.0, g.m('DIVIDE', dst, rt), clamp=True)
-    prof2 = g.smooth(t2_, 0.0, 1.0)
-    dt = g.m('MULTIPLY', prof2, S('Hole Depth'))
-    dt = g.m('MULTIPLY', dt, 0.6)
-    off_t = g.m('MULTIPLY', dt, m_top)
-    alloff = g.m('ADD', off_b, off_t)
-    alloff = g.m('MULTIPLY', alloff, S('Holes Enable'))
-    neg = g.m('MULTIPLY', alloff, -1.0)
-    cur = set_pos(g, cur, g.vec('ADD', p4, g.vec('SCALE', nrm_in(g), scale=neg)))
-    stages['holes'] = cur
+    # зоны по финальным позициям: низ — крупные поры, веера — мелкие дырочки;
+    # фильтр по нормали — резаем только НАРУЖНУЮ поверхность солида
+    sen = g.sep(nrm_in(g))
+    nxn, nyn, nzn = (sen, 'X'), (sen, 'Y'), (sen, 'Z')
+    dotp = g.m('ADD', g.m('ADD', g.m('MULTIPLY', nxn, x4),
+                          g.m('MULTIPLY', nyn, y4)),
+               g.m('MULTIPLY', nzn, z4))
+    plen = g.m('POWER', g.m('ADD', g.m('ADD', g.m('MULTIPLY', x4, x4),
+                                       g.m('MULTIPLY', y4, y4)),
+                             g.m('MULTIPLY', z4, z4)), 0.5)
+    cosb = g.m('DIVIDE', dotp, plen)
+    mask_b = g.m('MULTIPLY', g.smooth(z4, 0.02, 0.10),
+                 g.m('SUBTRACT', 1.0, g.smooth(z4, 0.78, 0.98)))
+    mask_b = g.m('MULTIPLY', mask_b, g.smooth(cosb, 0.0, 0.2))
+    mask_t = g.m('MULTIPLY', g.smooth(z4, 1.08, 1.22),
+                 g.m('SUBTRACT', 1.0, g.smooth(ln4, 1.20, 1.30)))
+    mask_t = g.m('MULTIPLY', mask_t, g.smooth(nzn, 0.25, 0.45))
+    en = S('Pores Enable')
+    mask_b = g.m('MULTIPLY', mask_b, en)
+    mask_t = g.m('MULTIPLY', mask_t, en)
+
+    def pore_spheres(mask_, dens, dist_min, rad, var, seed):
+        """DPF(Poisson) -> пер-точечный радиус -> сферы на поверхности -> realize.
+        Центр сфер лежит НА поверхности (Capture/SetPosition в 5.3 лишены
+        data_type — убраны ради надёжности; кромка и так круглая)."""
+        dpf = g.n('GeometryNodeDistributePointsOnFaces',
+                  distribute_method='POISSON')
+        g.link(cur[0], cur[1], dpf, 'Mesh')
+        dpf.inputs['Density Max'].default_value = dens  # в POISSON именно Density Max
+        dpf.inputs['Seed'].default_value = seed
+        g.link(dist_min[0], dist_min[1], dpf, 'Distance Min')
+        g.link(mask_[0], mask_[1], dpf, 'Density Factor')
+        rnd = g.n('FunctionNodeRandomValue', data_type='FLOAT')
+        rnd.inputs['Seed'].default_value = 11 + seed
+        g.link(g.m('SUBTRACT', 1.0, g.m('MULTIPLY', var, 0.5)), rnd, 'Min')
+        g.link(g.m('ADD', 1.0, g.m('MULTIPLY', var, 0.5)), rnd, 'Max')
+        ri = g.m('MULTIPLY', (rnd, 'Value'), rad)
+        ico = g.n('GeometryNodeMeshIcoSphere')
+        ico.inputs['Radius'].default_value = 1.0
+        ico.inputs['Subdivisions'].default_value = 2
+        inst = g.n('GeometryNodeInstanceOnPoints')
+        g.link(dpf, 'Points', inst, 'Points')
+        g.link(ico, 'Mesh', inst, 'Instance')
+        g.link(g.comb(ri, ri, ri), inst, 'Scale')
+        rlz = g.n('GeometryNodeRealizeInstances')
+        rlz.inputs['Realize All'].default_value = True
+        g.link(inst, 'Instances', rlz, 'Geometry')
+        return (rlz, 0)
+
+    s1 = pore_spheres(mask_b, 260.0, S('Pore Spacing'), S('Pore Radius'),
+                      S('Pore Var'), 3)
+    s2 = pore_spheres(mask_t, 520.0, S('Fine Spacing'), S('Fine Radius'),
+                      S('Pore Var'), 5)
+    jn2 = g.n('GeometryNodeJoinGeometry')
+    g.link(s1[0], s1[1], jn2, 'Geometry')
+    g.link(s2[0], s2[1], jn2, 'Geometry')
+    boo = g.n('GeometryNodeMeshBoolean', operation='DIFFERENCE')
+    try:
+        boo.solver = os.environ.get('CORAL_SOLVER', 'EXACT')
+    except Exception as e:
+        print(f'[pores] solver set failed: {e}', flush=True)
+    for opt in ('Self Intersection', 'Hole Tolerant'):
+        if opt in boo.inputs:          # у FLOAT-солвера этих сокетов нет
+            boo.inputs[opt].default_value = True
+    g.link(cur[0], cur[1], boo, 'Mesh 1')
+    g.link(jn2, 0, boo, 'Mesh 2')
+    cur = (boo, 0)
+    stages['pores'] = cur
 
     # ---- SMOOTH pass: Blur Attribute по позиции ----
     blr = g.n('GeometryNodeBlurAttribute')
@@ -534,7 +583,7 @@ def build_scene():
 
 # ---------------------------------------------------------------- main
 def main():
-    print(f'[coral] v10 start LOW={LOW} DIAG={DIAG}', flush=True)
+    print(f'[coral] v11 start LOW={LOW} DIAG={DIAG}', flush=True)
     # чистим factory-startup сцену (куб/камера/свет)
     for o in list(bpy.data.objects):
         bpy.data.objects.remove(o, do_unlink=True)
