@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-coral_gn.py — v13 «blender_stroika»
+coral_gn.py — v15 «blender_stroika» (плавная форма, ровные глубокие дырки)
 Процедурный коралл по референсу 0682af35916265e314b019420a043024.jpg:
   форма — ВЕРТИКАЛЬНЫЙ скульптурный рост: ствол с луковичными утолщениями
           и перетяжками, S-изгиб, спиральный перекрут рёбер-складок,
@@ -15,7 +15,7 @@ coral_gn.py — v13 «blender_stroika»
 глубина пор). Сферы-резаки внутри КАЖДОГО прохода не перекрываются
 (spacing ≥ 2·r_max), иначе FLOAT-солвер даёт кольца-шрамы.
 
-env: CORAL_SEED (7), CORAL_H (1.34), CORAL_WALL (0.030), CORAL_SOLVER (FLOAT),
+env: CORAL_SEED (7), CORAL_H (1.34), CORAL_WALL (0.040), CORAL_SOLVER (FLOAT),
      CORAL_LOW=1 (черновой рендер), CORAL_OUT=path, CORAL_BLEND=path,
      CORAL_DIAG=1, GN_<ИМЯ>=знач (переопределение слайдеров).
 """
@@ -184,7 +184,7 @@ def build_base_mesh(name='CoralBase'):
     """Вертикальный скульптурный коралл: ствол с луковичными утолщениями,
     S-изгиб, спиральный перекрут рёбер, 3 ответвления. Каждый элемент —
     замкнутый полый солид (стенка CORAL_WALL)."""
-    wall = float(os.environ.get('CORAL_WALL', '0.030'))
+    wall = float(os.environ.get('CORAL_WALL', '0.040'))
     H    = float(os.environ.get('CORAL_H', '1.34'))
     seed = int(float(os.environ.get('CORAL_SEED', '7')))
     rng  = random.Random(seed)
@@ -196,27 +196,26 @@ def build_base_mesh(name='CoralBase'):
     def trunk_pt(s):
         z = s * H
         ramp = sstep(s, 0.10, 0.26)   # ножка вертикальна: низ не тонет под пол
-        x = ramp * (0.15 * sin(2.5 * pi * s + 0.4) + 0.05 * sin(6.1 * s))
-        y = ramp * (0.11 * sin(1.9 * pi * s + 1.7) + 0.04 * cos(5.2 * s + 0.6))
+        x = ramp * (0.13 * sin(2.2 * pi * s + 0.4) + 0.04 * sin(5.3 * s))
+        y = ramp * (0.09 * sin(1.7 * pi * s + 1.7) + 0.03 * cos(4.6 * s + 0.6))
         return Vector((x, y, z))
 
     # ---- ствол: радиус (нога -> перетяжки/луковицы -> кончик) ----
-    KS = [(0.00, 0.340), (0.05, 0.380), (0.14, 0.320), (0.22, 0.200),
-          (0.29, 0.185), (0.36, 0.235), (0.44, 0.250), (0.53, 0.190),
-          (0.62, 0.250), (0.73, 0.275), (0.84, 0.185), (0.93, 0.205),
-          (1.06, 0.140), (1.18, 0.105), (1.30, 0.070), (1.36, 0.035)]
+    KS = [(0.00, 0.315), (0.06, 0.352), (0.16, 0.318), (0.28, 0.252),
+          (0.38, 0.222), (0.50, 0.244), (0.62, 0.230), (0.74, 0.254),
+          (0.86, 0.205), (0.98, 0.162), (1.10, 0.128), (1.22, 0.104),
+          (1.31, 0.092), (1.36, 0.085)]
     KS = [(z * H / 1.34, r) for (z, r) in KS]
 
     def trunk_r(s):
         z = s * H
         r = catmull(KS, z)
-        r *= 1.0 + 0.028 * sin(9.0 * s * pi + 1.3)          # средняя волна
+        r *= 1.0 + 0.015 * sin(4.5 * s * pi + 1.3)          # мягкая волна
         return r
 
     # ---- складки-лужи: k гармоник с ДРЕЙФОМ фазы по высоте (перекрут) ----
-    HARM = [(3, 0.100, 2.4 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28)),
-            (4, 0.045, -1.8 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28)),
-            (5, 0.035, 1.25 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28))]
+    HARM = [(3, 0.060, 2.2 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28)),
+            (4, 0.028, -1.6 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28))]
 
     def lump(ths, s, base_r, amp=1.0, end_fade=0.88):
         f = sstep(s, 0.08, 0.22) * (1.0 - sstep(s, end_fade, 0.995))
@@ -287,7 +286,7 @@ def build_base_mesh(name='CoralBase'):
             bm.faces.new((ri[-1][j], ri[-1][j2], c1))
 
     # ---- ствол ----
-    NZ, NS = 130, 56
+    NZ, NS = 160, 72
     pts = [trunk_pt(i / (NZ - 1)) for i in range(NZ)]
     fr = frames(pts)
     def trunk_rad(s, th):
@@ -301,7 +300,7 @@ def build_base_mesh(name='CoralBase'):
     base_b = [(0.30, -0.35, 0.55, 0.62),
               (0.56, 2.80, 0.60, 0.66),
               (0.80, 1.35, 0.40, 0.70),
-              (1.00, 0.40, 0.26, 0.55)]
+              (0.85, 0.40, 0.26, 0.80)]
     for (t0, phi, L, rs) in base_b:
         t0 += rng.uniform(-0.03, 0.03)
         phi += rng.uniform(-0.15, 0.15)
@@ -317,7 +316,7 @@ def build_base_mesh(name='CoralBase'):
         splay = 0.75 - 0.35 * t0                       # чем выше — тем вертикальнее
         hb = 0.72 * L
         w1, w2 = rng.uniform(0, 6.28), rng.uniform(0, 6.28)
-        NBZ, NBS = 66, 48
+        NBZ, NBS = 84, 60
         bpts = []
         for i in range(NBZ):
             s = i / (NBZ - 1)
@@ -330,11 +329,11 @@ def build_base_mesh(name='CoralBase'):
         ph3, ph4 = rng.uniform(0, 6.28), rng.uniform(0, 6.28)
         tw3 = rng.uniform(1.5, 2.6)
         def b_rad(s, th, r0=r0, ph3=ph3, ph4=ph4, tw3=tw3):
-            grow = 1.0 + 0.16 * sin(pi * s ** 0.85)
+            grow = 1.0 + 0.10 * sin(pi * s ** 0.85)
             taper = 1.0 - 0.74 * sstep(s, 0.50, 0.99)
             f = sstep(s, 0.05, 0.25) * (1.0 - sstep(s, 0.86, 0.995))
-            v = 1.0 + 0.09 * f * cos(3 * th + ph3 + tw3 * s)
-            v += 0.055 * f * cos(4 * th + ph4 - 1.4 * s)
+            v = 1.0 + 0.050 * f * cos(3 * th + ph3 + tw3 * s)
+            v += 0.028 * f * cos(4 * th + ph4 - 1.4 * s)
             return max(r0 * grow * taper * v, wall * 3.0)
         hollow_solid(bpts, bfr, b_rad, NBS)
         print(f'[branch{bi}] t0={t0:.2f} phi={phi:.2f} L={L} r0={r0:.3f}', flush=True)
@@ -351,11 +350,11 @@ def build_base_mesh(name='CoralBase'):
 SOCKETS = [
     # (имя, тип, дефолт, min, max)
     ('Geometry',        'NodeSocketGeometry', None, None, None),
-    ('Wobble',          'NodeSocketFloat', 0.006, 0.0, 0.08),
+    ('Wobble',          'NodeSocketFloat', 0.005, 0.0, 0.08),
     ('Pores Enable',    'NodeSocketFloat', 1.0, 0.0, 1.0),
     ('Pore Spacing',    'NodeSocketFloat', 0.155, 0.05, 0.3),
     ('Pore Radius',     'NodeSocketFloat', 0.068, 0.005, 0.09),
-    ('Pore Var',        'NodeSocketFloat', 0.12, 0.0, 1.0),
+    ('Pore Var',        'NodeSocketFloat', 0.05, 0.0, 1.0),
     ('Fine Spacing',    'NodeSocketFloat', 0.064, 0.02, 0.2),
     ('Fine Radius',     'NodeSocketFloat', 0.024, 0.005, 0.05),
     ('Extra Object',    'NodeSocketObject', None, None, None),
@@ -393,8 +392,8 @@ def build_gn(name='CoralGN'):
     p1 = pos_in(g); se1 = g.sep(p1)
     noi = g.n('ShaderNodeTexNoise')
     g.link(g.comb((se1, 'X'), (se1, 'Y'), (se1, 'Z')), noi, 'Vector')
-    noi.inputs['Scale'].default_value = 3.0
-    noi.inputs['Detail'].default_value = 2.0
+    noi.inputs['Scale'].default_value = 1.8
+    noi.inputs['Detail'].default_value = 1.0
     wob = g.m('MULTIPLY', (noi, 'Fac'), S('Wobble'))
     wob = g.m('SUBTRACT', wob, g.m('MULTIPLY', S('Wobble'), 0.5))
     cur = set_pos(g, cur, g.vec('ADD', p1, g.vec('SCALE', nrm_in(g), scale=wob)))
@@ -417,7 +416,7 @@ def build_gn(name='CoralGN'):
     g.link(g.comb(x4, y4, z4), noi2, 'Vector')
     noi2.inputs['Scale'].default_value = 2.4
     noi2.inputs['Detail'].default_value = 2.0
-    clump = g.m('ADD', 0.45, g.m('MULTIPLY', (noi2, 'Fac'), 0.60))
+    clump = g.m('ADD', 0.72, g.m('MULTIPLY', (noi2, 'Fac'), 0.30))
     mask_b = g.m('MULTIPLY', out_ok, zk_b)
     mask_b = g.m('MULTIPLY', mask_b, clump)
     mask_b = g.m('MULTIPLY', mask_b, en)
@@ -439,7 +438,7 @@ def build_gn(name='CoralGN'):
         ri = g.m('MULTIPLY', (rnd, 'Value'), rad)
         ico = g.n('GeometryNodeMeshIcoSphere')
         ico.inputs['Radius'].default_value = 1.0
-        ico.inputs['Subdivisions'].default_value = 3
+        ico.inputs['Subdivisions'].default_value = 2
         inst = g.n('GeometryNodeInstanceOnPoints')
         g.link(dpf, 'Points', inst, 'Points')
         g.link(dpf, 'Rotation', inst, 'Rotation')   # +Z вдоль нормали
@@ -466,11 +465,11 @@ def build_gn(name='CoralGN'):
 
     # проход 1: плотная мелкая губа по всему (сферы между собой не перекрываются)
     s2 = pore_spheres(mask_f, 520.0, S('Fine Spacing'), S('Fine Radius'),
-                      S('Pore Var'), 5, cur, depth=1.5)
+                      S('Pore Var'), int(float(os.environ.get('CORAL_SEED_FINE', '9'))), cur, depth=1.5)
     cur = boolean_diff(cur, s2)
     # проход 2: крупные полости ПОД конец — чистая ровная кромка сквозь губку
     s1 = pore_spheres(mask_b, 240.0, S('Pore Spacing'), S('Pore Radius'),
-                      S('Pore Var'), 3, cur, depth=1.9)
+                      S('Pore Var'), 3, cur, depth=1.8)
     cur = boolean_diff(cur, s1)
     # сварка: убивает вырожденные грани/рёбра boolean (источник «шипов»)
     mbd = g.n('GeometryNodeMergeByDistance')
@@ -514,7 +513,7 @@ def build_post(name='CoralPost'):
     ng.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
     ng.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
     it = ng.interface.new_socket('Smooth', in_out='INPUT', socket_type='NodeSocketInt')
-    it.default_value = 3
+    it.default_value = 5
     it.min_value = 0; it.max_value = 24
     g = G(ng)
     gi = g.n('NodeGroupInput'); gi.location = (-600, 0)
