@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-coral_gn.py — v11 «blender_stroika»
-Процедурный коралл по референсам Qwen21_00002.png + Qwen21_00015/00020.png:
-  низ — пухлое основание с НАСТОЯЩИМИ губчатыми дырками (Boolean Difference
-        со сферами: сквозные поры с чистой круглой кромкой, как у губки),
-  середина — гладкая скрученная талия,
-  верх — два веера с радиальными складками и мелкими ровными дырочками.
+coral_gn.py — v12 «blender_stroika»
+Процедурный коралл по референсам Qwen21_00015/00020.png:
+  форма — закрученное кольцо-«мёбиус»: труба переменного сечения, свитая
+          по окружности, сечение доворачивается на 1.5 полуоборота
+          (CORAL_TWIST), рёбра-складки на внутренней стороне спиралью;
+  дырки — крупные и плотные губчатые поры (Boolean Difference со сферами),
+          внешняя сторона трубы; внутренняя (к зёву) — гладкая с рёбрами.
 
-Толщина стенки (= глубина пор) заложена в базовую сетку (сдвиг профиля),
-env CORAL_WALL (по умолчанию 0.024). Сферы-резаки НЕ перекрываются
-(spacing ≥ 2·r_max), иначе FLOAT-солвер boolean даёт кольца-шрамы.
+База строится Python-sweep'ом как ЗАМКНУТЫЙ СОЛИД (внешняя + внутренняя
+поверхности, стенка CORAL_WALL=0.028 = глубина пор). Сферы-резаки НЕ
+перекрываются (spacing ≥ 2·r_max), иначе FLOAT-солвер даёт кольца-шрамы.
+
+env sweep-параметров: CORAL_TWIST (полуобороты, 1.5), CORAL_RING_R (0.43),
+CORAL_PLEAT_COUNT (36), CORAL_PLEAT_DEPTH (0.022), CORAL_WALL (0.028).
 
 Архитектура: Python-базовая сетка (тело вращения) + модификатор CoralGN (Geometry Nodes).
 Конвенция хелперов: скалярные/векторные хелперы возвращают (node, socket);
@@ -35,9 +39,7 @@ DIAG  = os.environ.get('CORAL_DIAG') == '1'
 OUT   = os.environ.get('CORAL_OUT')
 BLEND = os.environ.get('CORAL_BLEND')
 
-H = 1.50          # высота тела
-RINGS = 248       # колец тела вращения
-SEGS = 256        # сегментов по кругу
+# --- форма задаётся sweep'ом в build_base_mesh; HERE больше нет тела вращения ---
 
 # ---------------------------------------------------------------- утилиты GN
 class G:
@@ -166,91 +168,77 @@ def nrm_in(g):
     return (g.n('GeometryNodeInputNormal'), 'Normal')
 
 
-# ---------------------------------------------------------------- профиль
-PROFILE = [
-    (0.001, 0.000), (0.300, 0.020), (0.520, 0.100), (0.620, 0.300),
-    (0.600, 0.480), (0.470, 0.660), (0.300, 0.820), (0.185, 0.970),
-    (0.175, 1.060), (0.220, 1.160), (0.300, 1.260), (0.385, 1.360),
-    (0.435, 1.440), (0.443, 1.498), (0.420, 1.545),
-    (0.396, 1.538), (0.385, 1.490),
-]
-
-def catmull(p0, p1, p2, p3, t):
-    t2, t3 = t * t, t * t * t
-    return tuple(0.5 * ((2 * p1[i]) + (-p0[i] + p2[i]) * t +
-                        (2 * p0[i] - 5 * p1[i] + 4 * p2[i] - p3[i]) * t2 +
-                        (-p0[i] + 3 * p1[i] - 3 * p2[i] + p3[i]) * t3)
-                 for i in range(2))
-
-def sample_profile(rings):
-    pts = PROFILE
-    out = []
-    n_span = len(pts) - 1
-    per = max(2, rings // n_span)
-    for s in range(n_span):
-        p0 = pts[max(s - 1, 0)]; p1 = pts[s]; p2 = pts[s + 1]
-        p3 = pts[min(s + 2, n_span)]
-        for k in range(per):
-            out.append(catmull(p0, p1, p2, p3, k / per))
-    out.append(pts[-1])
-    return out
-
-
+# ---------------------------------------------------------------- база-sweep
 def build_base_mesh(name='CoralBase'):
-    """ЗАМКНУТЫЙ СОЛИД: внешняя поверхность + внутренняя (сдвиг профиля на
-    CORAL_WALL по 2D-нормали) + швы снизу/сверху. Стенка = глубина губчатых пор.
-    Boolean сфер против солида — стандартный случай (на открытой оболочке
-    exact-boolean в 5.3 съедает всю память — проверено, OOM-kill)."""
-    wall = float(os.environ.get('CORAL_WALL', '0.024'))
+    """Кольцо-«мёбиус»: труба переменного сечения вдоль окружности радиуса
+    CORAL_RING_R, сечение доворачивается на CORAL_TWIST полуоборотов (лестница
+    целых сдвигов — шов замыкается без дыр), рёбра — синус по сечению.
+    ЗАМКНУТЫЙ СОЛИД: внешняя + внутренняя (минус CORAL_WALL) поверхности.
+    (Вращение сечения — ориентированный солид; в 5.3 boolean сфер против
+    открытой оболочки падает: EXACT — segfault, FLOAT — OOM.)"""
+    wall  = float(os.environ.get('CORAL_WALL', '0.028'))
+    twist = float(os.environ.get('CORAL_TWIST', '1.5'))
+    pl_n  = max(0, int(float(os.environ.get('CORAL_PLEAT_COUNT', '36')))) // 2 * 2
+    pl_d  = float(os.environ.get('CORAL_PLEAT_DEPTH', '0.024'))
+    R     = float(os.environ.get('CORAL_RING_R', '0.43'))
+    NR, NS = 380, 176
+    TOT   = int(round(twist * NS / 2.0))       # полный сдвиг сечения в столбцах
+    print(f'[sweep] R={R} twist={twist} TOT={TOT} wall={wall} '
+          f'pleats={pl_n}x{pl_d} NR={NR} NS={NS}', flush=True)
     mesh = bpy.data.meshes.new(name)
     bm = bmesh.new()
-    prof = sample_profile(RINGS)
-    n = len(prof)
 
-    def n2d(i):
-        a = prof[max(i - 1, 0)]; b = prof[min(i + 1, n - 1)]
-        tr, tz = b[0] - a[0], b[1] - a[1]
-        l = math.hypot(tr, tz) or 1.0
-        return (tz / l, -tr / l)
+    def tube_r(u):
+        # гармонические биения толщины трубы (замкнуты по u, зёв круглее)
+        return (0.175 + 0.032 * math.cos(2.0 * u)
+                + 0.018 * math.sin(3.0 * u + 1.0)
+                - 0.012 * math.cos(5.0 * u + 2.1))
 
-    prof_in = []
-    for i, (r, z) in enumerate(prof):
-        nx, nz = n2d(i)
-        prof_in.append((max(0.012, r - wall * nx),
-                        max(0.004, z - wall * nz)))
-    grid = []
-    for (r, z), (ri, zi) in zip(prof, prof_in):
-        ro = []; rn = []
-        for j in range(SEGS):
-            a = 2 * pi * j / SEGS
-            ca, sa = cos(a), sin(a)
-            ro.append(bm.verts.new((r * ca, r * sa, z)))
-            rn.append(bm.verts.new((ri * ca, ri * sa, zi)))
-        grid.append((ro, rn))
-    bm.verts.ensure_lookup_table()
-    for i in range(n - 1):          # внешняя стенка
-        for j in range(SEGS):
-            j2 = (j + 1) % SEGS
-            bm.faces.new((grid[i][0][j], grid[i][0][j2],
-                          grid[i + 1][0][j2], grid[i + 1][0][j]))
-    for i in range(n - 1):          # внутренняя стенка
-        for j in range(SEGS):
-            j2 = (j + 1) % SEGS
-            bm.faces.new((grid[i][1][j], grid[i + 1][1][j],
-                          grid[i + 1][1][j2], grid[i][1][j2]))
-    for j in range(SEGS):           # швы низ/верх
-        j2 = (j + 1) % SEGS
-        bm.faces.new((grid[0][0][j], grid[0][1][j],
-                      grid[0][1][j2], grid[0][0][j2]))
-        bm.faces.new((grid[n - 1][0][j], grid[n - 1][0][j2],
-                      grid[n - 1][1][j2], grid[n - 1][1][j]))
-    # дно: внешняя крышка (полюс) + внутренняя крышка полости
-    c = bm.verts.new((0.0, 0.0, 0.0))
-    ci = bm.verts.new((0.0, 0.0, grid[0][1][0].co.z))
-    for j in range(SEGS):
-        j2 = (j + 1) % SEGS
-        bm.faces.new((c, grid[0][0][j2], grid[0][0][j]))
-        bm.faces.new((ci, grid[0][1][j], grid[0][1][j2]))
+    def sstep(x, e0, e1):
+        t = max(0.0, min(1.0, (x - e0) / (e1 - e0)))
+        return t * t * (3.0 - 2.0 * t)
+
+    def make_rows(shrink):
+        rows = []
+        for i in range(NR):
+            u = 2.0 * pi * i / NR
+            rt = tube_r(u) - shrink
+            sh = round(TOT * i / NR)           # целочисленная лестница сдвигов
+            erx, erz = math.sin(u), math.cos(u)
+            px, pz = R * erx, R * erz
+            bf = 1.12 - 0.08 * math.cos(2.0 * u + 0.7)   # вариативный эллипс
+            row = []
+            for j in range(NS):
+                psi = 2.0 * pi * (j + sh) / NS
+                a = rt * math.cos(psi)
+                b = rt * math.sin(psi) * bf
+                if pl_d > 0 and shrink == 0.0:
+                    # рёбра только на внутренней (к зёву) стороне — как на референсе;
+                    # зёв = psi≈π (направление −e_r), маска непрерывна на шве
+                    a += pl_d * math.sin(psi * pl_n + 2.0 * u) * \
+                        sstep(-math.cos(psi), 0.15, 0.55)
+                row.append(bm.verts.new((px + a * erx, b, pz + a * erz)))
+            rows.append(row)
+        return rows
+
+    outer = make_rows(0.0)
+    inner = make_rows(wall)
+
+    def stitch(rA, rB, off):
+        """Квады между соседними рядами; сдвиг уже зашит в координаты вершин,
+        поэтому off нужен только на шве (последний ряд -> первый)."""
+        for j in range(NS):
+            j2 = (j + 1) % NS
+            k  = (j + off) % NS
+            k2 = (j2 + off) % NS
+            bm.faces.new((rA[j], rA[j2], rB[k2], rB[k]))
+
+    for i in range(NR - 1):
+        stitch(outer[i], outer[i + 1], 0)
+    stitch(outer[NR - 1], outer[0], TOT % NS)      # шов внешней
+    for i in range(NR - 1):
+        stitch(inner[i], inner[i + 1], 0)
+    stitch(inner[NR - 1], inner[0], TOT % NS)      # шов внутренней
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     bm.to_mesh(mesh)
     bm.free()
@@ -263,20 +251,13 @@ def build_base_mesh(name='CoralBase'):
 SOCKETS = [
     # (имя, тип, дефолт, min, max)
     ('Geometry',        'NodeSocketGeometry', None, None, None),
-    ('Twist',           'NodeSocketFloat', 0.70, -2.0, 2.0),
     ('Wobble',          'NodeSocketFloat', 0.012, 0.0, 0.08),
-    ('Fan Spread',      'NodeSocketFloat', 0.62, 0.0, 1.5),
-    ('Fan Curl',        'NodeSocketFloat', 0.30, 0.0, 1.2),
-    ('Gap Rise',        'NodeSocketFloat', 0.25, 0.0, 0.6),
-    ('Lobe Sharp',      'NodeSocketFloat', 4.2, 0.5, 6.0),
-    ('Pleat Count',     'NodeSocketFloat', 36.0, 0.0, 120.0),
-    ('Pleat Depth',     'NodeSocketFloat', 0.040, 0.0, 0.1),
     ('Pores Enable',    'NodeSocketFloat', 1.0, 0.0, 1.0),
-    ('Pore Spacing',    'NodeSocketFloat', 0.088, 0.04, 0.3),
-    ('Pore Radius',     'NodeSocketFloat', 0.030, 0.005, 0.09),
-    ('Pore Var',        'NodeSocketFloat', 0.75, 0.0, 1.0),
-    ('Fine Spacing',    'NodeSocketFloat', 0.066, 0.02, 0.2),
-    ('Fine Radius',     'NodeSocketFloat', 0.024, 0.005, 0.05),
+    ('Pore Spacing',    'NodeSocketFloat', 0.112, 0.04, 0.3),
+    ('Pore Radius',     'NodeSocketFloat', 0.040, 0.005, 0.09),
+    ('Pore Var',        'NodeSocketFloat', 0.55, 0.0, 1.0),
+    ('Fine Spacing',    'NodeSocketFloat', 0.074, 0.02, 0.2),
+    ('Fine Radius',     'NodeSocketFloat', 0.028, 0.005, 0.05),
     ('Smooth',          'NodeSocketInt',   4, 0, 24),
     ('Cutter Scale',    'NodeSocketFloat', 1.0, 0.1, 5.0),
     ('Cutter Object',   'NodeSocketObject', None, None, None),
@@ -311,22 +292,6 @@ def build_gn(name='CoralGN'):
     g.link(oi_e, 'Geometry', jn, 'Geometry')
     cur = (jn, 0)
 
-    # ---- TWIST: поворот вокруг Z, угол растёт от талии (скрутка) ----
-    p0 = pos_in(g); se0 = g.sep(p0)
-    x, y, z = (se0, 'X'), (se0, 'Y'), (se0, 'Z')
-    th = g.m('ARCTAN2', y, x)
-    zn = g.m('DIVIDE', z, H)
-    a = g.m('MULTIPLY', g.m('SUBTRACT', zn, 0.5), S('Twist'))
-    th2 = g.m('ADD', th, a)
-    # ln = sqrt(x*x + y*y) — чистая float-математика (LENGTH в 5.3 молча даёт 0.5)
-    xx = g.m('MULTIPLY', x, x)
-    yy = g.m('MULTIPLY', y, y)
-    ln = g.m('POWER', g.m('ADD', xx, yy), 0.5)
-    xt = g.m('MULTIPLY', g.m('COSINE', th2), ln)
-    yt = g.m('MULTIPLY', g.m('SINE', th2), ln)
-    cur = set_pos(g, cur, g.comb(xt, yt, z))
-    stages['twist'] = cur
-
     # ---- WOBBLE: лёгкий органический шум вдоль нормали ----
     p1 = pos_in(g); se1 = g.sep(p1)
     noi = g.n('ShaderNodeTexNoise')
@@ -338,72 +303,28 @@ def build_gn(name='CoralGN'):
     cur = set_pos(g, cur, g.vec('ADD', p1, g.vec('SCALE', nrm_in(g), scale=wob)))
     stages['wobble'] = cur
 
-    # ---- PLEATS: радиальные складки на веерах ----
-    p2 = pos_in(g); se2 = g.sep(p2)
-    x2, y2, z2 = (se2, 'X'), (se2, 'Y'), (se2, 'Z')
-    th2_ = g.m('ARCTAN2', y2, x2)
-    rid = g.m('SINE', g.m('MULTIPLY', th2_, S('Pleat Count')))
-    amp = g.m('MULTIPLY', rid, S('Pleat Depth'))
-    up1 = g.smooth(z2, 1.02, 1.16)
-    up2 = g.m('SUBTRACT', 1.0, g.smooth(z2, 1.45, 1.525))
-    pmask = g.m('MULTIPLY', up1, up2)
-    amp = g.m('MULTIPLY', amp, pmask)
-    cur = set_pos(g, cur, g.vec('ADD', p2, g.vec('SCALE', nrm_in(g), scale=amp)))
-    stages['pleats'] = cur
-
-    # ---- LOBES: два веера в стороны (+X/-X) с загибом вниз ----
-    p3 = pos_in(g); se3 = g.sep(p3)
-    x3, y3, z3 = (se3, 'X'), (se3, 'Y'), (se3, 'Z')
-    th3 = g.m('ARCTAN2', y3, x3)
-    c2 = g.m('COSINE', g.m('MULTIPLY', th3, 2.0))
-    lobe = g.m('POWER', g.m('ADD', g.m('MULTIPLY', c2, 0.5), 0.5), S('Lobe Sharp'))
-    zr = g.smooth(z3, 0.98, 1.10)
-    rimr = g.smooth(z3, 1.00, 1.44)
-    push = g.m('MULTIPLY', lobe, S('Fan Spread'))
-    push = g.m('MULTIPLY', push, zr)
-    push = g.m('MULTIPLY', push, rimr)
-    # рваная кромка: рифление модулирует разлёт крыла
-    rip = g.m('SINE', g.m('MULTIPLY', th3, S('Pleat Count')))
-    push = g.m('MULTIPLY', push, g.m('ADD', 1.0, g.m('MULTIPLY', rip, 0.28)))
-    pushv = g.vec('SCALE', g.vec('NORMALIZE', g.comb(x3, y3, 0.0)), scale=push)
-    psp = g.sep(pushv)
-    curl = g.m('MULTIPLY', lobe, S('Fan Curl'))
-    curl = g.m('MULTIPLY', curl, zr)
-    curl = g.m('MULTIPLY', curl, rimr)
-    # между веерами зона приподнимается -> глубокий V-вырез
-    rise = g.m('MULTIPLY', g.m('SUBTRACT', 1.0, lobe), S('Gap Rise'))
-    rise = g.m('MULTIPLY', rise, zr)
-    znew = g.m('SUBTRACT', z3, curl)
-    znew = g.m('ADD', znew, rise)
-    cur = set_pos(g, cur, g.comb(g.m('ADD', x3, (psp, 'X')),
-                                 g.m('ADD', y3, (psp, 'Y')), znew))
-    stages['lobes'] = cur
-
-    # ---- PORES: настоящие губчатые дырки — Boolean Difference со сферами ----
+    # ---- PORES: губчатые дырки на ВНЕШНЕЙ стороне кольца ----
+    # кольцо лежит в XZ (ось — Y): наружная сторона трубы = нормаль сонаправлена
+    # радиалу (x,0,z); фильтр |xz| > R отсекает стенку внутренней полости
     p4 = pos_in(g); se4 = g.sep(p4)
     x4, y4, z4 = (se4, 'X'), (se4, 'Y'), (se4, 'Z')
-    ln4 = g.m('POWER', g.m('ADD', g.m('MULTIPLY', x4, x4),
-                           g.m('MULTIPLY', y4, y4)), 0.5)
-    # зоны по финальным позициям: низ — крупные поры, веера — мелкие дырочки;
-    # фильтр по нормали — резаем только НАРУЖНУЮ поверхность солида
     sen = g.sep(nrm_in(g))
-    nxn, nyn, nzn = (sen, 'X'), (sen, 'Y'), (sen, 'Z')
-    dotp = g.m('ADD', g.m('ADD', g.m('MULTIPLY', nxn, x4),
-                          g.m('MULTIPLY', nyn, y4)),
-               g.m('MULTIPLY', nzn, z4))
-    plen = g.m('POWER', g.m('ADD', g.m('ADD', g.m('MULTIPLY', x4, x4),
-                                       g.m('MULTIPLY', y4, y4)),
-                             g.m('MULTIPLY', z4, z4)), 0.5)
-    cosb = g.m('DIVIDE', dotp, plen)
-    mask_b = g.m('MULTIPLY', g.smooth(z4, 0.02, 0.10),
-                 g.m('SUBTRACT', 1.0, g.smooth(z4, 0.78, 0.98)))
-    mask_b = g.m('MULTIPLY', mask_b, g.smooth(cosb, 0.0, 0.2))
-    mask_t = g.m('MULTIPLY', g.smooth(z4, 1.08, 1.22),
-                 g.m('SUBTRACT', 1.0, g.smooth(ln4, 1.20, 1.30)))
-    mask_t = g.m('MULTIPLY', mask_t, g.smooth(nzn, 0.25, 0.45))
+    nxn, nzn = (sen, 'X'), (sen, 'Z')
+    lxz = g.m('POWER', g.m('ADD', g.m('MULTIPLY', x4, x4),
+                           g.m('MULTIPLY', z4, z4)), 0.5)
+    dotp = g.m('ADD', g.m('MULTIPLY', nxn, x4), g.m('MULTIPLY', nzn, z4))
+    cosb = g.m('DIVIDE', dotp, lxz)
+    RING = float(os.environ.get('CORAL_RING_R', '0.43'))
+    out_ok = g.smooth(lxz, RING + 0.005, RING + 0.045)
     en = S('Pores Enable')
+    # крупные поры: внешняя половина трубы
+    mask_b = g.m('MULTIPLY', g.smooth(cosb, 0.28, 0.38), out_ok)
     mask_b = g.m('MULTIPLY', mask_b, en)
-    mask_t = g.m('MULTIPLY', mask_t, en)
+    # мелкие: широкий пояс от зёва до крупной зоны (зоны НЕ перекрываются)
+    mask_f = g.m('MULTIPLY', g.smooth(cosb, -0.25, -0.12),
+                 g.m('SUBTRACT', 1.0, g.smooth(cosb, 0.14, 0.22)))
+    mask_f = g.m('MULTIPLY', mask_f, out_ok)
+    mask_f = g.m('MULTIPLY', mask_f, en)
 
     def pore_spheres(mask_, dens, dist_min, rad, var, seed):
         """DPF(Poisson) -> пер-точечный радиус -> сферы на поверхности -> realize.
@@ -433,9 +354,9 @@ def build_gn(name='CoralGN'):
         g.link(inst, 'Instances', rlz, 'Geometry')
         return (rlz, 0)
 
-    s1 = pore_spheres(mask_b, 260.0, S('Pore Spacing'), S('Pore Radius'),
+    s1 = pore_spheres(mask_b, 240.0, S('Pore Spacing'), S('Pore Radius'),
                       S('Pore Var'), 3)
-    s2 = pore_spheres(mask_t, 520.0, S('Fine Spacing'), S('Fine Radius'),
+    s2 = pore_spheres(mask_f, 420.0, S('Fine Spacing'), S('Fine Radius'),
                       S('Pore Var'), 5)
     jn2 = g.n('GeometryNodeJoinGeometry')
     g.link(s1[0], s1[1], jn2, 'Geometry')
@@ -554,7 +475,7 @@ def build_scene():
         lo = bpy.data.objects.new(name, ld)
         lo.location = loc
         bpy.context.collection.objects.link(lo)
-        d = Vector((0, 0, 0.7)) - lo.location
+        d = Vector((0, 0, 0.0)) - lo.location
         lo.rotation_euler = d.to_track_quat('-Z', 'Y').to_euler()
         return lo
     light('Key', (3.0, -2.6, 2.6), 3.5, 120)
@@ -565,8 +486,8 @@ def build_scene():
     cd.lens = 50
     cam = bpy.data.objects.new('Cam', cd)
     bpy.context.collection.objects.link(cam)
-    cam.location = (2.2, -3.6, 2.35)
-    d = Vector((0, 0, 0.72)) - cam.location
+    cam.location = (2.5, -3.4, 1.0)
+    d = Vector((0, 0, 0.0)) - cam.location
     cam.rotation_euler = d.to_track_quat('-Z', 'Y').to_euler()
     bpy.context.scene.camera = cam
 
@@ -583,7 +504,7 @@ def build_scene():
 
 # ---------------------------------------------------------------- main
 def main():
-    print(f'[coral] v11 start LOW={LOW} DIAG={DIAG}', flush=True)
+    print(f'[coral] v12 start LOW={LOW} DIAG={DIAG}', flush=True)
     # чистим factory-startup сцену (куб/камера/свет)
     for o in list(bpy.data.objects):
         bpy.data.objects.remove(o, do_unlink=True)
