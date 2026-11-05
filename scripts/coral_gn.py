@@ -210,13 +210,13 @@ def build_base_mesh(name='CoralBase'):
     def trunk_r(s):
         z = s * H
         r = catmull(KS, z)
-        r *= 1.0 + 0.035 * sin(9.0 * s * pi + 1.3)          # средняя волна
+        r *= 1.0 + 0.028 * sin(9.0 * s * pi + 1.3)          # средняя волна
         return r
 
     # ---- складки-лужи: k гармоник с ДРЕЙФОМ фазы по высоте (перекрут) ----
     HARM = [(3, 0.100, 2.4 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28)),
-            (4, 0.060, -1.8 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28)),
-            (5, 0.045, 1.25 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28))]
+            (4, 0.045, -1.8 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28)),
+            (5, 0.035, 1.25 * rng.uniform(0.85, 1.15), rng.uniform(0, 6.28))]
 
     def lump(ths, s, base_r, amp=1.0, end_fade=0.88):
         f = sstep(s, 0.08, 0.22) * (1.0 - sstep(s, end_fade, 0.995))
@@ -351,16 +351,13 @@ def build_base_mesh(name='CoralBase'):
 SOCKETS = [
     # (имя, тип, дефолт, min, max)
     ('Geometry',        'NodeSocketGeometry', None, None, None),
-    ('Wobble',          'NodeSocketFloat', 0.008, 0.0, 0.08),
+    ('Wobble',          'NodeSocketFloat', 0.006, 0.0, 0.08),
     ('Pores Enable',    'NodeSocketFloat', 1.0, 0.0, 1.0),
     ('Pore Spacing',    'NodeSocketFloat', 0.155, 0.05, 0.3),
     ('Pore Radius',     'NodeSocketFloat', 0.068, 0.005, 0.09),
-    ('Pore Var',        'NodeSocketFloat', 0.15, 0.0, 1.0),
-    ('Fine Spacing',    'NodeSocketFloat', 0.062, 0.02, 0.2),
-    ('Fine Radius',     'NodeSocketFloat', 0.023, 0.005, 0.05),
-    ('Smooth',          'NodeSocketInt',   3, 0, 24),
-    ('Cutter Scale',    'NodeSocketFloat', 1.0, 0.1, 5.0),
-    ('Cutter Object',   'NodeSocketObject', None, None, None),
+    ('Pore Var',        'NodeSocketFloat', 0.12, 0.0, 1.0),
+    ('Fine Spacing',    'NodeSocketFloat', 0.064, 0.02, 0.2),
+    ('Fine Radius',     'NodeSocketFloat', 0.024, 0.005, 0.05),
     ('Extra Object',    'NodeSocketObject', None, None, None),
 ]
 
@@ -442,7 +439,7 @@ def build_gn(name='CoralGN'):
         ri = g.m('MULTIPLY', (rnd, 'Value'), rad)
         ico = g.n('GeometryNodeMeshIcoSphere')
         ico.inputs['Radius'].default_value = 1.0
-        ico.inputs['Subdivisions'].default_value = 2
+        ico.inputs['Subdivisions'].default_value = 3
         inst = g.n('GeometryNodeInstanceOnPoints')
         g.link(dpf, 'Points', inst, 'Points')
         g.link(dpf, 'Rotation', inst, 'Rotation')   # +Z вдоль нормали
@@ -467,46 +464,20 @@ def build_gn(name='CoralGN'):
         g.link(cut[0], cut[1], boo, 'Mesh 2')
         return (boo, 0)
 
-    # проход 1: крупные полости (НЕ перекрываются: spacing ≥ 2·r_max)
-    s1 = pore_spheres(mask_b, 240.0, S('Pore Spacing'), S('Pore Radius'),
-                      S('Pore Var'), 3, cur, depth=2.0)
-    cur = boolean_diff(cur, s1)
-    # проход 2: плотная мелкая губа поверх всего (сферы между собой не перекрываются)
+    # проход 1: плотная мелкая губа по всему (сферы между собой не перекрываются)
     s2 = pore_spheres(mask_f, 520.0, S('Fine Spacing'), S('Fine Radius'),
-                      S('Pore Var'), 5, cur, depth=1.6)
+                      S('Pore Var'), 5, cur, depth=1.5)
     cur = boolean_diff(cur, s2)
+    # проход 2: крупные полости ПОД конец — чистая ровная кромка сквозь губку
+    s1 = pore_spheres(mask_b, 240.0, S('Pore Spacing'), S('Pore Radius'),
+                      S('Pore Var'), 3, cur, depth=1.9)
+    cur = boolean_diff(cur, s1)
+    # сварка: убивает вырожденные грани/рёбра boolean (источник «шипов»)
+    mbd = g.n('GeometryNodeMergeByDistance')
+    g.link(cur[0], cur[1], mbd, 'Geometry')
+    mbd.inputs['Distance'].default_value = 0.0008
+    cur = (mbd, 0)
     stages['pores'] = cur
-
-    # ---- SMOOTH pass: Blur Attribute по позиции ----
-    blr = g.n('GeometryNodeBlurAttribute')
-    blr.data_type = 'FLOAT_VECTOR'
-    g.link(pos_in(g), blr, 'Value')
-    blr.inputs['Weight'].default_value = 1.0
-    g.link(S('Smooth'), blr, 'Iterations')
-    cur = set_pos(g, cur, blr)
-    stages['blur'] = cur
-
-    # ---- Shade Smooth ----
-    sss = g.n('GeometryNodeSetShadeSmooth')
-    sss.domain = 'FACE'
-    g.link(cur[0], cur[1], sss, 'Geometry')
-    sss.inputs['Shade Smooth'].default_value = True
-    cur = (sss, 0)
-    stages['shade'] = cur
-
-    # ---- BOOLEAN: слот Cutter Object ----
-    oi_c = g.n('GeometryNodeObjectInfo', transform_space='ORIGINAL')
-    g.link(S('Cutter Object'), oi_c, 'Object')
-    oi_c.inputs['As Instance'].default_value = False
-    cs = S('Cutter Scale')
-    tr = g.n('GeometryNodeTransform')
-    g.link(oi_c, 'Geometry', tr, 'Geometry')
-    g.link(g.comb(cs, cs, cs), tr, 'Scale')
-    boo = g.n('GeometryNodeMeshBoolean', operation='DIFFERENCE')
-    g.link(cur[0], cur[1], boo, 0)
-    g.link(tr, 'Geometry', boo, 1)
-    cur = (boo, 0)
-    stages['bool'] = cur
 
     final = stages.get(os.environ.get('CORAL_STAGE', ''), cur)
     g.link(final[0], final[1], go, 'Geometry')
@@ -534,6 +505,32 @@ def build_gn(name='CoralGN'):
                         f'({ft})->{lnk.to_node.name}:{lnk.to_socket.name}({tt})')
     if mism:
         print(f'[verify] TYPE-MISMATCH: {mism}', flush=True)
+    return ng
+
+
+# ---- пост-обработка: blur + shade smooth (ПОСЛЕ voxel-remesh) ----
+def build_post(name='CoralPost'):
+    ng = bpy.data.node_groups.new(name, 'GeometryNodeTree')
+    ng.interface.new_socket('Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    ng.interface.new_socket('Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+    it = ng.interface.new_socket('Smooth', in_out='INPUT', socket_type='NodeSocketInt')
+    it.default_value = 3
+    it.min_value = 0; it.max_value = 24
+    g = G(ng)
+    gi = g.n('NodeGroupInput'); gi.location = (-600, 0)
+    go = g.n('NodeGroupOutput'); go.location = (600, 0)
+    blr = g.n('GeometryNodeBlurAttribute')
+    blr.data_type = 'FLOAT_VECTOR'
+    pos = pos_in(g)
+    g.link(pos, blr, 'Value')
+    blr.inputs['Weight'].default_value = 1.0
+    g.link((gi, 'Smooth'), blr, 'Iterations')
+    cur = set_pos(g, (gi, 'Geometry'), blr)
+    sss = g.n('GeometryNodeSetShadeSmooth')
+    sss.domain = 'FACE'
+    g.link(cur[0], cur[1], sss, 'Geometry')
+    sss.inputs['Shade Smooth'].default_value = True
+    g.link((sss, 0), go, 'Geometry')
     return ng
 
 
@@ -609,16 +606,15 @@ def build_scene():
 
 # ---------------------------------------------------------------- main
 def main():
-    print(f'[coral] v13 start LOW={LOW} DIAG={DIAG}', flush=True)
+    print(f'[coral] v14 start LOW={LOW} DIAG={DIAG}', flush=True)
     for o in list(bpy.data.objects):
         bpy.data.objects.remove(o, do_unlink=True)
     obj = build_base_mesh()
     print(f'[mesh] verts={len(obj.data.vertices)} faces={len(obj.data.polygons)}', flush=True)
 
     ng = build_gn()
-    mod = obj.modifiers.new('CoralGN', 'NODES')
-    mod.node_group = ng
-
+    # env-переопределения дефолтов ДО создания модификатора: 5.3 кэширует
+    # значения сокетов в момент mod.node_group = ng, позже не меняются
     for item in ng.interface.items_tree:
         if item.in_out == 'INPUT' and item.item_type == 'SOCKET':
             env = 'GN_' + item.name.upper().replace(' ', '_')
@@ -626,21 +622,53 @@ def main():
                 raw = os.environ[env]
                 try:
                     if 'Int' in item.socket_type:
-                        mod[item.identifier] = int(float(raw))
+                        item.default_value = int(float(raw))
                     elif 'Float' in item.socket_type:
-                        mod[item.identifier] = float(raw)
-                    elif 'Object' in item.socket_type:
-                        mod[item.identifier] = bpy.data.objects.get(raw)
+                        item.default_value = float(raw)
                 except Exception as e:
                     print(f'[env] FAIL {env}={raw}: {e}', flush=True)
                 else:
                     print(f'[env] {env}={raw}', flush=True)
 
+    mod = obj.modifiers.new('CoralGN', 'NODES')
+    mod.node_group = ng
+
+    # voxel-remesh — OPT-IN (ломается на тонких стенках после float-boolean):
+    # CORAL_REMESH=1 CORAL_VOXEL_SIZE=0.009
+    if os.environ.get('CORAL_REMESH', '0') == '1':
+        rm = obj.modifiers.new('Remesh', 'REMESH')
+        rm.mode = 'VOXEL'
+        rm.voxel_size = float(os.environ.get('CORAL_VOXEL_SIZE', '0.009'))
+        try:
+            rm.smooth_shading = True
+        except Exception:
+            pass
+    ng2 = build_post()
+    if 'GN_SMOOTH' in os.environ:   # blur живёт в пост-группе
+        try:
+            for it2 in ng2.interface.items_tree:
+                if it2.name == 'Smooth':
+                    it2.default_value = int(float(os.environ['GN_SMOOTH']))
+            print(f"[env] GN_SMOOTH={os.environ['GN_SMOOTH']} (post)", flush=True)
+        except Exception as e:
+            print(f'[env] FAIL GN_SMOOTH: {e}', flush=True)
+    mod2 = obj.modifiers.new('CoralPost', 'NODES')
+    mod2.node_group = ng2
+    for item in ng.interface.items_tree:          # Object-сокеты — только так
+        if item.in_out == 'INPUT' and item.item_type == 'SOCKET' \
+                and 'Object' in item.socket_type:
+            env = 'GN_' + item.name.upper().replace(' ', '_')
+            if env in os.environ:
+                try:
+                    mod[item.identifier] = bpy.data.objects.get(os.environ[env])
+                except Exception as e:
+                    print(f'[env] FAIL {env}: {e}', flush=True)
+
     vals = []
     for it in ng.interface.items_tree:
         if it.in_out == 'INPUT' and it.item_type == 'SOCKET' and it.name != 'Geometry':
             try:
-                vals.append(f"{it.name}={mod[it.identifier]}")
+                vals.append(f"{it.name}={it.default_value}")
             except Exception:
                 vals.append(f"{it.name}=<obj>")
     print('[sock] ' + ', '.join(vals), flush=True)
