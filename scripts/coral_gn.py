@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-coral_gn.py — v17 «blender_stroika» (МОНОЛИТ + поры без пересечений)
+coral_gn.py — v18 «blender_stroika» (глубже/темнее внутри + плотная мелкая сетка)
 Процедурный коралл по референсу 0682af35916265e314b019420a043024.jpg:
   форма — ВЕРТИКАЛЬНЫЙ скульптурный рост: ствол с луковичными утолщениями
           и перетяжками, S-изгиб, спиральный перекрут рёбер-складок,
@@ -38,6 +38,19 @@ v17: поры не пересекаются -> кромки ровные. Ист
      Атрибуты после boolean теряются — поэтому мелкие поры считаются на
      чистой поверхности ДО boolean (порядок: центры буров -> центры мелких
      -> димплы -> boolean буров).
+
+v18: «глубже/темнее внутри (как на керамике) + плотнее сетка мелких пор»:
+  1) ТЕМНОТА — в материал CoralWhite добавлен шейдерный Ambient Occlusion
+     (only_local, дистанция 0.22): Base Color = mix(тёмный тёплый, белый,
+     1 − AO^1.5). Стенки буров и димплов уходят в тень тем глубже, чем
+     глубже полость — взгляд читает ГЛУБИНУ, как на керамическом референсе.
+  2) ГЛУБИНА — буры 3.0→3.8·r, средние 1.6→2.0·r, димплы 1.05→1.35·r
+     (falloff уже: sstep 0.28r..0.80r — ямки круглее и глубже); guard'ы
+     pr/mb/mf прежние — пробоя тонких мест нет (≤0.94·R).
+  3) ПЛОТНЕЕ мелкая сетка — Fine Spacing 0.072→0.054, Fine Radius
+     0.034→0.028 (пор ×1.8 по площади), Density Max 380→700 (кап DPF выше
+     нужного), меш плотнее: ствол 176×88, ветви 92×70 (~3 вершины поперёк
+     ямки — димплы не алиасятся).
 
 env: CORAL_SEED (7), CORAL_H (1.34), CORAL_SOLVER (FLOAT),
      CORAL_LOW=1 (черновой рендер), CORAL_OUT=path, CORAL_BLEND=path,
@@ -339,7 +352,7 @@ def build_base_mesh(name='CoralBase'):
             bm.faces.new((ro[-1][j], ro[-1][j2], c1))
 
     # ---- ствол ----
-    NZ, NS = 160, 72
+    NZ, NS = 176, 88
     pts = [trunk_pt(i / (NZ - 1)) for i in range(NZ)]
     fr = frames(pts)
     def trunk_rad(s, th):
@@ -370,7 +383,7 @@ def build_base_mesh(name='CoralBase'):
         splay = 0.75 - 0.35 * t0                       # чем выше — тем вертикальнее
         hb = 0.72 * L
         w1, w2 = rng.uniform(0, 6.28), rng.uniform(0, 6.28)
-        NBZ, NBS = 84, 60
+        NBZ, NBS = 92, 70
         bpts = []
         for i in range(NBZ):
             s = i / (NBZ - 1)
@@ -466,8 +479,8 @@ SOCKETS = [
     ('Pore Var',        'NodeSocketFloat', 0.05, 0.0, 1.0),
     ('Med Spacing',     'NodeSocketFloat', 0.085, 0.02, 0.3),
     ('Med Radius',      'NodeSocketFloat', 0.032, 0.005, 0.09),
-    ('Fine Spacing',    'NodeSocketFloat', 0.072, 0.02, 0.2),
-    ('Fine Radius',     'NodeSocketFloat', 0.034, 0.005, 0.05),
+    ('Fine Spacing',    'NodeSocketFloat', 0.038, 0.02, 0.2),
+    ('Fine Radius',     'NodeSocketFloat', 0.019, 0.005, 0.05),
     ('Smooth',          'NodeSocketInt', 7, 0, 24),
     ('Extra Object',    'NodeSocketObject', None, None, None),
 ]
@@ -542,6 +555,13 @@ def build_gn(name='CoralGN'):
     mask_b = g.m('MULTIPLY', mask_b, clump)
     mask_b = g.m('MULTIPLY', mask_b, en)
     mask_f = g.m('MULTIPLY', out_ok, g.smooth(z4, 0.045, 0.095))
+    # v18: мягкая пятнистость мелкой сетки — зоны гуще/реже, как на керамике
+    noi3 = g.n('ShaderNodeTexNoise')
+    g.link(g.comb(x4, y4, z4), noi3, 'Vector')
+    noi3.inputs['Scale'].default_value = 3.2
+    noi3.inputs['Detail'].default_value = 2.0
+    clump_f = g.m('ADD', 0.62, g.m('MULTIPLY', (noi3, 'Fac'), 0.38))
+    mask_f = g.m('MULTIPLY', mask_f, clump_f)
     mask_f = g.m('MULTIPLY', mask_f, en)
 
     def attr_f(name):
@@ -634,7 +654,7 @@ def build_gn(name='CoralGN'):
 
     # A: центры КРУПНЫХ БУРОВ на чистой поверхности (атрибуты pr/mb живы)
     s1, pts1 = pore_spheres(mask_b, 500.0, S('Pore Spacing'), S('Pore Radius'),
-                            S('Pore Var'), 3, cur, depth=3.0, rattr='pr', mattr='mb')
+                            S('Pore Var'), 3, cur, depth=3.8, rattr='pr', mattr='mb')
     if os.environ.get('CORAL_STAGE') == 'pts1':
         # счётчик: ico r=0.004 на точки -> realize (42 верша/точка)
         icoD = g.n('GeometryNodeMeshIcoSphere')
@@ -650,7 +670,7 @@ def build_gn(name='CoralGN'):
     # A2: центры СРЕДНИХ буров — та же маска, гуще; отсечка от крупных
     if os.environ.get('CORAL_NO_MED', '0') != '1':
         s1b, pts1b = pore_spheres(mask_b, 800.0, S('Med Spacing'), S('Med Radius'),
-                                  S('Pore Var'), 5, cur, depth=1.6, rattr='pr', mattr='mm',
+                                  S('Pore Var'), 5, cur, depth=2.0, rattr='pr', mattr='mm',
                                   exclude=[(pts1, S('Pore Radius'))])
     else:
         s1b, pts1b = None, None
@@ -675,9 +695,9 @@ def build_gn(name='CoralGN'):
         excl2 = [(pts1, S('Pore Radius'))]
         if pts1b is not None:
             excl2.append((pts1b, S('Med Radius')))
-        _s2, pts2 = pore_spheres(mask_f, 380.0, S('Fine Spacing'), S('Fine Radius'),
+        _s2, pts2 = pore_spheres(mask_f, 2500.0, S('Fine Spacing'), S('Fine Radius'),
                                  S('Pore Var'), int(float(os.environ.get('CORAL_SEED_FINE', '9'))),
-                                 cur, depth=1.35, cut=False, mattr='mf', exclude=excl2)
+                                 cur, depth=1.35, cut=False, mattr='mf', exclude=excl2, margin=0.006)
         if os.environ.get('CORAL_STAGE') == 'pts2':
             icoD2 = g.n('GeometryNodeMeshIcoSphere')
             icoD2.inputs['Radius'].default_value = 0.004
@@ -713,6 +733,14 @@ def build_gn(name='CoralGN'):
         g.link(cur[0], cur[1], mbd, 'Geometry')
         mbd.inputs['Distance'].default_value = 0.0012
         cur = (mbd, 0)
+    # P: СУБДИВ ПОСЛЕ boolean (сам boolean — по coarse, без мусора), ПОД ДИМПЛАМИ:
+    # ямки получают x4 плотности вершин -> мельче, круглее, без изломов
+    # (плотная губка как на референсе). CORAL_POST_SUBDIV=0 — выкл.
+    if os.environ.get('CORAL_POST_SUBDIV', '1') != '0':
+        sub2 = g.n('GeometryNodeSubdivideMesh')
+        sub2.inputs['Level'].default_value = int(float(os.environ.get('CORAL_POST_SUBDIV', '1')))
+        g.link(cur[0], cur[1], sub2, 'Mesh')
+        cur = (sub2, 0)
     # F: ДИМПЛЫ (мелкие поры) — после boolean, БЕЗ blur за ними: ни одного
     # резака — ни FLOAT-щелей, ни «звёзд», рвани нет в принципе. Кромки буров
     # чисты: их зоны свободны от мелких центров (отсечка в шаге B), ямка туда
@@ -722,9 +750,9 @@ def build_gn(name='CoralGN'):
         g.link(pts2[0], pts2[1], prox2, 'Target')
         r0f = S('Fine Radius')
         fall = g.m('SUBTRACT', 1.0, g.smooth((prox2, 'Distance'),
-                                             g.m('MULTIPLY', r0f, 0.30),
-                                             g.m('MULTIPLY', r0f, 0.85)))
-        dep = g.m('MULTIPLY', r0f, 1.05)
+                                             g.m('MULTIPLY', r0f, 0.26),
+                                             g.m('MULTIPLY', r0f, 0.74)))
+        dep = g.m('MULTIPLY', r0f, 1.25)
         offv = g.vec('SCALE', nrm_in(g),
                      scale=g.m('MULTIPLY', dep,
                                g.m('MULTIPLY', fall, g.m('MULTIPLY', S('Pores Enable'), -1.0))))
@@ -782,11 +810,45 @@ def build_scene():
     obj = bpy.data.objects.get('CoralBase')
     mat = bpy.data.materials.new('CoralWhite')
     mat.use_nodes = True
-    b = mat.node_tree.nodes['Principled BSDF']
-    b.inputs['Base Color'].default_value = (0.93, 0.92, 0.90, 1.0)
+    nt = mat.node_tree
+    b = nt.nodes['Principled BSDF']
     b.inputs['Roughness'].default_value = 0.48
     if 'Specular IOR Level' in b.inputs:
         b.inputs['Specular IOR Level'].default_value = 0.35
+    # v18: тёмные полости как на керамике — шейдерный Ambient Occlusion:
+    # чем глубже точка (полость бура/димпла, складка), тем темнее Base Color.
+    ao = nt.nodes.new('ShaderNodeAmbientOcclusion')
+    ao.only_local = True
+    ao.samples = 8
+    for sname in ('Distance', 'Radius'):
+        try:
+            ao.inputs[sname].default_value = 0.25
+            break
+        except Exception:
+            continue
+    ao2 = nt.nodes.new('ShaderNodeAmbientOcclusion')
+    ao2.only_local = True
+    ao2.samples = 8
+    for sname in ('Distance', 'Radius'):
+        try:
+            ao2.inputs[sname].default_value = 0.05
+            break
+        except Exception:
+            continue
+    aoM = nt.nodes.new('ShaderNodeMath'); aoM.operation = 'MULTIPLY'
+    pwn = nt.nodes.new('ShaderNodeMath'); pwn.operation = 'POWER'
+    pwn.inputs[1].default_value = 1.6
+    mx = nt.nodes.new('ShaderNodeMix'); mx.data_type = 'RGBA'
+    mx.blend_type = 'MIX'
+    # Factor = (AO_макро · AO_микро)^1.6: открыто -> B белый, любая полость
+    # (бур или микроямка) -> A тёмный; микро-канал затеняет саму губку
+    mx.inputs[6].default_value = (0.085, 0.072, 0.065, 1.0)   # A: тёмная полость
+    mx.inputs[7].default_value = (0.93, 0.92, 0.90, 1.0)      # B: базовый белый
+    nt.links.new(ao.outputs['AO'], aoM.inputs[0])
+    nt.links.new(ao2.outputs['AO'], aoM.inputs[1])
+    nt.links.new(aoM.outputs[0], pwn.inputs[0])
+    nt.links.new(pwn.outputs[0], mx.inputs['Factor'])
+    nt.links.new(mx.outputs[2], b.inputs['Base Color'])
     obj.data.materials.append(mat)
 
     # пол-подиум в тон фона (мягкая тень, как на референсе)
@@ -855,7 +917,7 @@ def build_scene():
 
 # ---------------------------------------------------------------- main
 def main():
-    print(f'[coral] v17 start LOW={LOW} DIAG={DIAG}', flush=True)
+    print(f'[coral] v18 start LOW={LOW} DIAG={DIAG}', flush=True)
     for o in list(bpy.data.objects):
         bpy.data.objects.remove(o, do_unlink=True)
     obj = build_base_mesh()
