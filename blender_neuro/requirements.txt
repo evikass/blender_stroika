@@ -1,0 +1,7 @@
+pybullet>=3.2.6
+gymnasium>=0.29
+stable-baselines3>=2.3
+numpy>=1.24
+# PyTorch ставится отдельно под ваше железо:
+#  RTX 50xx (5060 Ti и др.):  pip install torch --index-url https://download.pytorch.org/whl/cu128
+#  только CPU:                pip install torch --index-url https://download.pytorch.org/whl/cpu

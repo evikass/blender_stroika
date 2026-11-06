@@ -1,0 +1,6 @@
+# генерируемые файлы
+outputs/*
+!outputs/.gitkeep
+__pycache__/
+*.pyc
+venv/

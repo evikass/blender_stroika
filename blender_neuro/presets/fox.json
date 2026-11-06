@@ -1,0 +1,549 @@
+{
+ "name": "fox",
+ "root": "body",
+ "links": [
+  {
+   "name": "body",
+   "parent": null,
+   "joint": null,
+   "com": [
+    0.0,
+    0.0,
+    0.42
+   ],
+   "mass": 14.0,
+   "shape": {
+    "type": "capsule",
+    "axis": "x",
+    "radius": 0.15,
+    "half_len": 0.26,
+    "color": [
+     0.9,
+     0.45,
+     0.1,
+     1
+    ]
+   }
+  },
+  {
+   "name": "head",
+   "parent": "body",
+   "joint": {
+    "anchor": [
+     0.3,
+     0,
+     0.5
+    ],
+    "axis": [
+     0,
+     1,
+     0
+    ],
+    "lo": -0.7,
+    "hi": 0.7,
+    "max_force": 40.0,
+    "range": 0.6
+   },
+   "com": [
+    0.44,
+    0,
+    0.54
+   ],
+   "mass": 2.24,
+   "shape": {
+    "type": "capsule",
+    "axis": "x",
+    "radius": 0.1,
+    "half_len": 0.08,
+    "color": [
+     0.9450000000000001,
+     0.45,
+     0.1,
+     1
+    ]
+   },
+   "end": [
+    0.58,
+    0,
+    0.52
+   ]
+  },
+  {
+   "name": "hipR_FL",
+   "parent": "body",
+   "joint": {
+    "anchor": [
+     0.2,
+     0.09019999999999999,
+     0.44
+    ],
+    "axis": [
+     1,
+     0,
+     0
+    ],
+    "lo": -0.35,
+    "hi": 0.35,
+    "max_force": 60.0,
+    "range": 0.35
+   },
+   "com": [
+    0.2,
+    0.11,
+    0.44
+   ],
+   "mass": 0.14,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.035,
+    "half_len": 0.035,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   }
+  },
+  {
+   "name": "hipP_FL",
+   "parent": "hipR_FL",
+   "joint": {
+    "anchor": [
+     0.2,
+     0.11,
+     0.42
+    ],
+    "axis": [
+     0,
+     1,
+     0
+    ],
+    "lo": -1.4,
+    "hi": 1.0,
+    "max_force": 90.0,
+    "range": 1.0
+   },
+   "com": [
+    0.2,
+    0.11,
+    0.3
+   ],
+   "mass": 1.1900000000000002,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.045,
+    "half_len": 0.08,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   }
+  },
+  {
+   "name": "knee_FL",
+   "parent": "hipP_FL",
+   "joint": {
+    "anchor": [
+     0.2,
+     0.11,
+     0.21999999999999997
+    ],
+    "axis": [
+     0,
+     1,
+     0
+    ],
+    "lo": -0.05,
+    "hi": 2.0,
+    "max_force": 70.0,
+    "range": 1.0
+   },
+   "com": [
+    0.2,
+    0.11,
+    0.12
+   ],
+   "mass": 0.5880000000000001,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.036,
+    "half_len": 0.08,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   },
+   "end": [
+    0.2,
+    0.11,
+    0.024999999999999967
+   ]
+  },
+  {
+   "name": "hipR_FR",
+   "parent": "body",
+   "joint": {
+    "anchor": [
+     0.2,
+     -0.09019999999999999,
+     0.44
+    ],
+    "axis": [
+     1,
+     0,
+     0
+    ],
+    "lo": -0.35,
+    "hi": 0.35,
+    "max_force": 60.0,
+    "range": 0.35
+   },
+   "com": [
+    0.2,
+    -0.11,
+    0.44
+   ],
+   "mass": 0.14,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.035,
+    "half_len": 0.035,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   }
+  },
+  {
+   "name": "hipP_FR",
+   "parent": "hipR_FR",
+   "joint": {
+    "anchor": [
+     0.2,
+     -0.11,
+     0.42
+    ],
+    "axis": [
+     0,
+     1,
+     0
+    ],
+    "lo": -1.4,
+    "hi": 1.0,
+    "max_force": 90.0,
+    "range": 1.0
+   },
+   "com": [
+    0.2,
+    -0.11,
+    0.3
+   ],
+   "mass": 1.1900000000000002,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.045,
+    "half_len": 0.08,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   }
+  },
+  {
+   "name": "knee_FR",
+   "parent": "hipP_FR",
+   "joint": {
+    "anchor": [
+     0.2,
+     -0.11,
+     0.21999999999999997
+    ],
+    "axis": [
+     0,
+     1,
+     0
+    ],
+    "lo": -0.05,
+    "hi": 2.0,
+    "max_force": 70.0,
+    "range": 1.0
+   },
+   "com": [
+    0.2,
+    -0.11,
+    0.12
+   ],
+   "mass": 0.5880000000000001,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.036,
+    "half_len": 0.08,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   },
+   "end": [
+    0.2,
+    -0.11,
+    0.024999999999999967
+   ]
+  },
+  {
+   "name": "hipR_HL",
+   "parent": "body",
+   "joint": {
+    "anchor": [
+     -0.2,
+     0.09019999999999999,
+     0.44
+    ],
+    "axis": [
+     1,
+     0,
+     0
+    ],
+    "lo": -0.35,
+    "hi": 0.35,
+    "max_force": 60.0,
+    "range": 0.35
+   },
+   "com": [
+    -0.2,
+    0.11,
+    0.44
+   ],
+   "mass": 0.14,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.035,
+    "half_len": 0.035,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   }
+  },
+  {
+   "name": "hipP_HL",
+   "parent": "hipR_HL",
+   "joint": {
+    "anchor": [
+     -0.2,
+     0.11,
+     0.42
+    ],
+    "axis": [
+     0,
+     1,
+     0
+    ],
+    "lo": -1.4,
+    "hi": 1.0,
+    "max_force": 90.0,
+    "range": 1.0
+   },
+   "com": [
+    -0.2,
+    0.11,
+    0.3
+   ],
+   "mass": 1.1900000000000002,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.045,
+    "half_len": 0.08,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   }
+  },
+  {
+   "name": "knee_HL",
+   "parent": "hipP_HL",
+   "joint": {
+    "anchor": [
+     -0.2,
+     0.11,
+     0.21999999999999997
+    ],
+    "axis": [
+     0,
+     1,
+     0
+    ],
+    "lo": -0.05,
+    "hi": 2.0,
+    "max_force": 70.0,
+    "range": 1.0
+   },
+   "com": [
+    -0.2,
+    0.11,
+    0.12
+   ],
+   "mass": 0.5880000000000001,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.036,
+    "half_len": 0.08,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   },
+   "end": [
+    -0.2,
+    0.11,
+    0.024999999999999967
+   ]
+  },
+  {
+   "name": "hipR_HR",
+   "parent": "body",
+   "joint": {
+    "anchor": [
+     -0.2,
+     -0.09019999999999999,
+     0.44
+    ],
+    "axis": [
+     1,
+     0,
+     0
+    ],
+    "lo": -0.35,
+    "hi": 0.35,
+    "max_force": 60.0,
+    "range": 0.35
+   },
+   "com": [
+    -0.2,
+    -0.11,
+    0.44
+   ],
+   "mass": 0.14,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.035,
+    "half_len": 0.035,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   }
+  },
+  {
+   "name": "hipP_HR",
+   "parent": "hipR_HR",
+   "joint": {
+    "anchor": [
+     -0.2,
+     -0.11,
+     0.42
+    ],
+    "axis": [
+     0,
+     1,
+     0
+    ],
+    "lo": -1.4,
+    "hi": 1.0,
+    "max_force": 90.0,
+    "range": 1.0
+   },
+   "com": [
+    -0.2,
+    -0.11,
+    0.3
+   ],
+   "mass": 1.1900000000000002,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.045,
+    "half_len": 0.08,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   }
+  },
+  {
+   "name": "knee_HR",
+   "parent": "hipP_HR",
+   "joint": {
+    "anchor": [
+     -0.2,
+     -0.11,
+     0.21999999999999997
+    ],
+    "axis": [
+     0,
+     1,
+     0
+    ],
+    "lo": -0.05,
+    "hi": 2.0,
+    "max_force": 70.0,
+    "range": 1.0
+   },
+   "com": [
+    -0.2,
+    -0.11,
+    0.12
+   ],
+   "mass": 0.5880000000000001,
+   "shape": {
+    "type": "capsule",
+    "axis": "z",
+    "radius": 0.036,
+    "half_len": 0.08,
+    "color": [
+     0.54,
+     0.27,
+     0.06,
+     1
+    ]
+   },
+   "end": [
+    -0.2,
+    -0.11,
+    0.024999999999999967
+   ]
+  }
+ ],
+ "notes": "quadruped template fox, scale=1.0"
+}
