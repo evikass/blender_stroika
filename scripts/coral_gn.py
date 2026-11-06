@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-coral_gn.py — v18 «blender_stroika» (глубже/темнее внутри + плотная мелкая сетка)
+coral_gn.py — v19 «blender_stroika» (много плотных ГЛАДКИХ пор — без многоугольников)
 Процедурный коралл по референсу 0682af35916265e314b019420a043024.jpg:
   форма — ВЕРТИКАЛЬНЫЙ скульптурный рост: ствол с луковичными утолщениями
           и перетяжками, S-изгиб, спиральный перекрут рёбер-складок,
@@ -52,7 +52,45 @@ v18: «глубже/темнее внутри (как на керамике) + �
      нужного), меш плотнее: ствол 176×88, ветви 92×70 (~3 вершины поперёк
      ямки — димплы не алиасятся).
 
+v19: «дырок должно быть много и плотнее и более сглаженные — не должно быть
+многоугольников»:
+  1) СУБДИВ ПОСЛЕ boolean: simple SubdivideMesh только добавлял вершины,
+     НЕ гладя позиции — ямки-димплы и кромки буров оставались
+     многоугольными. Заменён на CATMULL-CLARK (Subdivision Surface):
+     relaxing скругляет и кромки, и профили ямок. Коралл при этом
+     «всплывает» над полом (catmull приподнимает кромку footing) -> низ
+     клампится z>=0 обратно на подиум.
+  2) БУРЫ — ЦИЛИНДРЫ вместо эллипсоидов: глубокий эллипсоид выходит из
+     поверхности ПО КАСАТЕЛЬНОЙ (grazing) — FLOAT-пересечение грубое,
+     кромка многоугольная (октаэдр на bulb'е в close-up v18). Стенки
+     цилиндра выходят почти перпендикулярно -> кромка круглая и ровная;
+     плоское дно глубоко в материале -> тёмная полость (AO).
+  3) МАСКА cosb УДАЛЕНА: фильтр «только наружная сторона трубы» остался от
+     полого кольца v11-12; на монолите он выключал ПОЛОВИНУ поверхности
+     (тыльная сторона и верхне-наклонные участки — верх ствола был голым).
+     Поры теперь везде, кроме смотрящих ВНИЗ граней (smooth по nz:
+     −0.28..−0.06) — плоское дно-фан без дыр (был «рваный воротник»).
+  4) UNION СОЛИДОВ до GN (ствол + 4 ветви, через boolean-модификаторы):
+     тело было 5 пересекающимися солидами — у швов под кожей лежали
+     стенки соседа, резак у шва открывал щель/«две стенки» (чёрный разрыв
+     на close-up v19_f). Union растворяет внутренние стенки — у любой
+     дыры ОДНА стенка. Гашения у швов переписаны на знаковое расстояние
+     до ЧУЖОЙ поверхности (осевые проходили сквозь ствол и гасили весь
+     пояс вокруг корня — верх был голым) и ослаблены до 0.03/0.08.
+  5) ЛОВУНКА: EXACT-union даёт T-junctions, на которых FLOAT-резаки
+     оставляют мусор ВНУТРИ полостей (после catmull — белые комки-шары).
+     Лечение: union тем же FLOAT-солвером (целостность та же: 0 boundary,
+     0 non-manifold; EXACT-резаки на union-меше по-прежнему съедают тело).
+  6) ПОСТ-СУБДИВ 1→2 (×16 вершин, ~450k): на level 1 ямки-димплы были
+     ромбическими (3 вершины на ямку) — «многоугольники» с close-up;
+     профиль ямки расширен 0.26-0.74r → 0.20-0.80r.
+  7) ПЛОТНЕЕ: Fine Spacing 0.038→0.030 (пор ×1.6 по площади), Fine Radius
+     0.019→0.018, Density Max 2500→4000; Med Spacing 0.085→0.072 (×1.4),
+     Density 800→1200; буры Spacing 0.122→0.115, Density 500→700.
+     Правило FLOAT spacing >= 2·r_max соблюдено (0.115>=0.113, 0.072>=0.066).
+
 env: CORAL_SEED (7), CORAL_H (1.34), CORAL_SOLVER (FLOAT),
+     CORAL_UNI_SOLVER (FLOAT — см. п.5), CORAL_POST_SUBDIV (2),
      CORAL_LOW=1 (черновой рендер), CORAL_OUT=path, CORAL_BLEND=path,
      CORAL_DIAG=1, CORAL_CLOSE=1 (камера вблизи для контроля дырок),
      GN_<ИМЯ>=знач (переопределение слайдеров).
@@ -234,23 +272,8 @@ def build_base_mesh(name='CoralBase'):
     seed = int(float(os.environ.get('CORAL_SEED', '7')))
     rng  = random.Random(seed)
 
-    mesh = bpy.data.meshes.new(name)
+    solids = []   # по bmesh на деталь (ствол, ветви) — объединяются UNION'ом
     bm = bmesh.new()
-    # слои атрибутов пор — создаём ДО вершин: добавление слоёв инвалидирует
-    # уже выданные BMVert-обёртки (ReferenceError «has been removed»)
-    if os.environ.get('CORAL_ATTRS', '1') != '0':
-        lay_pr = bm.verts.layers.float.new('pr')   # множитель радиуса бура
-        lay_pf = bm.verts.layers.float.new('pf')   # множитель радиуса мелкой поры
-        lay_mb = bm.verts.layers.float.new('mb')   # маска «крупный бур разрешён»
-        lay_mm = bm.verts.layers.float.new('mm')   # маска «средний бур разрешён»
-        lay_mf = bm.verts.layers.float.new('mf')   # маска «мелкая пора разрешена»
-    else:
-        lay_pr = lay_pf = lay_mb = lay_mm = lay_mf = None
-
-    VRT_R = []   # (вершина, локальный радиус детали, часть: 0 ствол, 1+ ветвь)
-
-    def pore_collect(v, r, part):
-        VRT_R.append((v, max(r, 0.0), part))
 
     # ---- ствол: ось (S-изгиб) ----
     def trunk_pt(s):
@@ -313,7 +336,6 @@ def build_base_mesh(name='CoralBase'):
                 th = 2.0 * pi * j / ns
                 r = rad_fun(s, th)
                 v = bm.verts.new(pts[i] + nv * (r * cos(th)) + bv * (r * sin(th)))
-                pore_collect(v, r, part)
                 row.append(v)
             rows.append(row)
         return rows
@@ -333,20 +355,17 @@ def build_base_mesh(name='CoralBase'):
         nsl = len(ro[0])
         if flat_base:                             # дно на полу (не видно)
             c0 = bm.verts.new(pts[0])
-            pore_collect(c0, 0.0, part)
             for j in range(nsl):
                 j2 = (j + 1) % nsl
                 bm.faces.new((ro[0][j2], ro[0][j], c0))
         else:
             r_e = max(rad_fun(0.0, 0.0), 0.015) * 0.6
             c0 = bm.verts.new(pts[0] + fr[0][0] * r_e)   # конус-корень внутрь
-            pore_collect(c0, 0.0, part)
             for j in range(nsl):
                 j2 = (j + 1) % nsl
                 bm.faces.new((ro[0][j2], ro[0][j], c0))
         r_t = max(rad_fun(1.0, 0.0), 0.015) * 0.6
         c1 = bm.verts.new(pts[-1] - fr[-1][0] * r_t)     # конус-кончик внутрь
-        pore_collect(c1, 0.0, part)
         for j in range(nsl):
             j2 = (j + 1) % nsl
             bm.faces.new((ro[-1][j], ro[-1][j2], c1))
@@ -359,6 +378,7 @@ def build_base_mesh(name='CoralBase'):
         r = lump(th, s, trunk_r(s))
         return max(r, 0.015)
     solid_tube(pts, fr, trunk_rad, NS, flat_base=True)
+    solids.append(bm)
     print(f'[trunk] rows={NZ} ring={NS}', flush=True)
 
     # ---- ответвления: (t0 на стволе, азимут, длина, толщина) ----
@@ -384,6 +404,7 @@ def build_base_mesh(name='CoralBase'):
         hb = 0.72 * L
         w1, w2 = rng.uniform(0, 6.28), rng.uniform(0, 6.28)
         NBZ, NBS = 92, 70
+        bm = bmesh.new()
         bpts = []
         for i in range(NBZ):
             s = i / (NBZ - 1)
@@ -403,6 +424,7 @@ def build_base_mesh(name='CoralBase'):
             v += 0.028 * f * cos(4 * th + ph4 - 1.4 * s)
             return max(r0 * grow * taper * v, 0.012)
         solid_tube(bpts, bfr, b_rad, NBS, part=bi + 1)
+        solids.append(bm)
         bax = []
         for i in range(0, NBZ, 3):
             s = i / (NBZ - 1)
@@ -411,61 +433,122 @@ def build_base_mesh(name='CoralBase'):
         baxes.append(bax)
         print(f'[branch{bi}] t0={t0:.2f} phi={phi:.2f} L={L} r0={r0:.3f}', flush=True)
 
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    for sbm in solids:
+        bmesh.ops.recalc_face_normals(sbm, faces=sbm.faces)
 
-    # ---- запись атрибутов пор (слои созданы до вершин — обёртки живы):
-    # радиус/маска от локальной толщины R + гашение буров у СТЫКОВ деталей
-    # (boolean по шву двух солидов даёт рвань) ----
+    # ---- UNION солидов (v19): тело — пересекающиеся замкнутые солиды; у швов
+    # под кожей лежат стенки соседа, и резак у шва открывал щель / «две стенки».
+    # EXACT-UNION растворяет внутренние стенки — остаётся ОДИН объём: у любой
+    # дыры одна стенка, гашения у швов почти не нужны.
+    parts = []
+    for i, sbm in enumerate(solids):
+        me = bpy.data.meshes.new(f'CoralPart{i}')
+        sbm.to_mesh(me)
+        sbm.free()
+        ob = bpy.data.objects.new(f'CoralPart{i}', me)
+        bpy.context.collection.objects.link(ob)
+        parts.append(ob)
+    base = parts[0]
+    uni_solver = os.environ.get('CORAL_UNI_SOLVER', 'EXACT')
+    for ob in parts[1:]:
+        uni = base.modifiers.new('uni', 'BOOLEAN')
+        uni.operation = 'UNION'
+        uni.solver = uni_solver
+        uni.object = ob
+    dg = bpy.context.evaluated_depsgraph_get()
+    ev = base.evaluated_get(dg)
+    uni_me = bpy.data.meshes.new_from_object(ev, depsgraph=dg)
+    ev.to_mesh_clear()
+    old_me = base.data
+    base.data = uni_me
+    base.name = name
+    uni_me.name = name
+    base.modifiers.clear()
+    for ob in parts[1:]:
+        me_o = ob.data
+        bpy.data.objects.remove(ob, do_unlink=True)
+        if me_o.users == 0:
+            bpy.data.meshes.remove(me_o)
+    if old_me.users == 0:
+        bpy.data.meshes.remove(old_me)
+    print(f'[union] parts={len(parts)} solver={uni_solver} verts={len(uni_me.vertices)}', flush=True)
+    # диагностика целостности: дырки в швах -> AO-лучи «вытекают» -> полости белые
+    _chk = bmesh.new()
+    _chk.from_mesh(uni_me)
+    _nb = sum(1 for e in _chk.edges if len(e.link_faces) == 1)
+    _nm = sum(1 for e in _chk.edges if len(e.link_faces) > 2)
+    _nf = len(_chk.faces)
+    _chk.free()
+    print(f'[union-check] boundary_edges={_nb} nonmanifold_edges={_nm} faces={_nf}', flush=True)
+
+    # ---- атрибуты пор на финальной (объединённой) поверхности ----
     tax = [(pts[i], trunk_r(i / (NZ - 1))) for i in range(0, NZ, 3)]
     axes = [tax] + baxes
-    for (v, r, part) in (VRT_R if os.environ.get('CORAL_ATTRS', '1') != '0' else []):
-        # три гашения у швов деталей (разные классы пор ломают шов по-разному):
-        # b — крупные буры (мягкое), m — средние (жёсткое, источник «шара»),
-        # f — мелкие димплы (среднее, источник щели шва)
-        fade_b = fade_m = fade_f = 1.0
+    bm = bmesh.new()
+    bm.from_mesh(uni_me)
+    # слои создаём ДО итераций по вершинам (иначе обёртки инвалидируются)
+    if os.environ.get('CORAL_ATTRS', '1') != '0':
+        lay_pr = bm.verts.layers.float.new('pr')   # множитель радиуса бура
+        lay_pf = bm.verts.layers.float.new('pf')   # множитель радиуса мелкой поры
+        lay_mb = bm.verts.layers.float.new('mb')   # маска «крупный бур разрешён»
+        lay_mm = bm.verts.layers.float.new('mm')   # маска «средний бур разрешён»
+        lay_mf = bm.verts.layers.float.new('mf')   # маска «мелкая пора разрешена»
+    else:
+        lay_pr = lay_pf = lay_mb = lay_mm = lay_mf = None
+    for v in bm.verts:
         p = v.co
-        for qi, ax in enumerate(axes):
-            if qi == part:
-                continue
-            dmin = 1e18
-            rq = 0.1
+        smins = []
+        arads = []
+        for ax in axes:
+            best = 1e18
+            best_ar = 0.05
             for (ap, ar) in ax:
                 dx = p[0] - ap.x
                 dy = p[1] - ap.y
                 dz = p[2] - ap.z
-                d2 = dx * dx + dy * dy + dz * dz
-                if d2 < dmin:
-                    dmin = d2
-                    rq = ar
-            d = math.sqrt(dmin)
-            for (fade, lo_k, lo_a, hi_k, hi_a, hard) in (
-                    (0, 1.1, 0.03, 1.1, 0.16, False),
-                    (1, 1.05, 0.10, 1.05, 0.26, True),
-                    (2, 1.05, 0.05, 1.05, 0.20, False)):
-                lo = rq * lo_k + lo_a
-                hi = rq * hi_k + hi_a
-                if d < hi:
-                    val = 0.0 if (hard and d < lo) else sstep(d, lo, hi)
+                q = math.sqrt(dx * dx + dy * dy + dz * dz) - ar
+                if q < best:
+                    best = q
+                    best_ar = ar
+            smins.append(best)
+            arads.append(best_ar)
+        # своя деталь — та, чья поверхность проходит через вершину (|s|≈0)
+        own = 0
+        for qi in range(1, len(axes)):
+            if abs(smins[qi]) < abs(smins[own]):
+                own = qi
+        br = arads[own]
+        fade_b = fade_m = fade_f = 1.0
+        for qi in range(len(axes)):
+            if qi == own:
+                continue
+            smin = smins[qi]
+            # v19: после UNION шов — просто линия стыка на одном солиде;
+            # гасим только узкую зону у самого шва (кромка бура не должна
+            # ложиться ровно на линию стыка)
+            for (fade, lo, hi, hard) in (
+                    (0, 0.030, 0.080, False),   # крупные буры
+                    (1, 0.025, 0.070, True),    # средние
+                    (2, 0.012, 0.040, False)):  # димплы
+                if smin < hi:
+                    val = 0.0 if (hard and smin < lo) else sstep(smin, lo, hi)
                     if fade == 0:
                         fade_b *= val
                     elif fade == 1:
                         fade_m *= val
                     else:
                         fade_f *= val
-        v[lay_pr] = min(1.0, max(0.35, r / 0.16))
-        v[lay_pf] = min(1.0, max(0.60, r / 0.09))
-        v[lay_mb] = sstep(r, 0.05, 0.07) * fade_b
-        v[lay_mm] = sstep(r, 0.05, 0.07) * fade_m
-        # fade и на мелкие поры: ямка у шва вдавливает вершины СКВОЗЬ стенку
-        # соседней детали и раскрывает щель шва
-        v[lay_mf] = sstep(r, 0.045, 0.06) * fade_f
-    print(f'[pores-attrs] verts={len(bm.verts)} collected={len(VRT_R)}', flush=True)
-
-    bm.to_mesh(mesh)
+        if lay_pr is not None:
+            v[lay_pr] = min(1.0, max(0.35, br / 0.16))
+            v[lay_pf] = min(1.0, max(0.60, br / 0.09))
+            v[lay_mb] = sstep(br, 0.05, 0.07) * fade_b
+            v[lay_mm] = sstep(br, 0.05, 0.07) * fade_m
+            # v19: мелкие ямки и на тонких местах (порог 0.045→0.030)
+            v[lay_mf] = sstep(br, 0.030, 0.045) * fade_f
+    bm.to_mesh(uni_me)
     bm.free()
-    obj = bpy.data.objects.new(name, mesh)
-    bpy.context.collection.objects.link(obj)
-    return obj
+    print(f'[pores-attrs] verts={len(uni_me.vertices)}', flush=True)
+    return base
 
 
 # ---------------------------------------------------------------- дерево GN
@@ -474,13 +557,13 @@ SOCKETS = [
     ('Geometry',        'NodeSocketGeometry', None, None, None),
     ('Wobble',          'NodeSocketFloat', 0.0035, 0.0, 0.08),
     ('Pores Enable',    'NodeSocketFloat', 1.0, 0.0, 1.0),
-    ('Pore Spacing',    'NodeSocketFloat', 0.122, 0.05, 0.3),
+    ('Pore Spacing',    'NodeSocketFloat', 0.115, 0.05, 0.3),
     ('Pore Radius',     'NodeSocketFloat', 0.055, 0.005, 0.09),
     ('Pore Var',        'NodeSocketFloat', 0.05, 0.0, 1.0),
-    ('Med Spacing',     'NodeSocketFloat', 0.085, 0.02, 0.3),
+    ('Med Spacing',     'NodeSocketFloat', 0.072, 0.02, 0.3),
     ('Med Radius',      'NodeSocketFloat', 0.032, 0.005, 0.09),
-    ('Fine Spacing',    'NodeSocketFloat', 0.038, 0.02, 0.2),
-    ('Fine Radius',     'NodeSocketFloat', 0.019, 0.005, 0.05),
+    ('Fine Spacing',    'NodeSocketFloat', 0.030, 0.02, 0.2),
+    ('Fine Radius',     'NodeSocketFloat', 0.018, 0.005, 0.05),
     ('Smooth',          'NodeSocketInt', 7, 0, 24),
     ('Extra Object',    'NodeSocketObject', None, None, None),
 ]
@@ -537,15 +620,16 @@ def build_gn(name='CoralGN'):
     p4 = pos_in(g); se4 = g.sep(p4)
     x4, y4, z4 = (se4, 'X'), (se4, 'Y'), (se4, 'Z')
     sen = g.sep(nrm_in(g))
-    nxn, nyn = (sen, 'X'), (sen, 'Y')
-    lr = g.m('POWER', g.m('ADD', g.m('MULTIPLY', x4, x4),
-                          g.m('MULTIPLY', y4, y4)), 0.5)
-    dotp = g.m('ADD', g.m('MULTIPLY', nxn, x4), g.m('MULTIPLY', nyn, y4))
-    cosb = g.m('DIVIDE', dotp, g.m('MAXIMUM', lr, 0.02))
-    out_ok = g.smooth(cosb, -0.02, 0.12)   # шире: чуть за силуэт — наклонные овальные устья как на референсе
+    # v19: маска cosb («только наружная сторона трубы») УДАЛЕНА — тело
+    # монолитное, внутренней полости нет, а старый фильтр оставлял БЕЗ ПОР
+    # половину поверхности (тыльную и верхне-наклонную — из-за него верх
+    # ствола был голым). Теперь поры везде, КРОМЕ смотрящих вниз участков
+    # (дно-фан, нижние свесы): дыры на плоском днище давали «рваный воротник».
+    down = g.smooth((sen, 'Z'), -0.06, -0.28)   # 1 только там, где смотрит ВНИЗ
+    out_ok = g.m('SUBTRACT', 1.0, down)
     en = S('Pores Enable')
     zk_b = g.m('MULTIPLY', g.smooth(z4, 0.07, 0.16),
-               g.m('SUBTRACT', 1.0, g.smooth(z4, 1.20, 1.34)))
+               g.m('SUBTRACT', 1.0, g.smooth(z4, 1.24, 1.345)))
     noi2 = g.n('ShaderNodeTexNoise')
     g.link(g.comb(x4, y4, z4), noi2, 'Vector')
     noi2.inputs['Scale'].default_value = 2.4
@@ -577,12 +661,15 @@ def build_gn(name='CoralGN'):
         return (na, 0)
 
     def pore_spheres(mask_, dens, dist_min, rad, var, seed, mesh, depth=2.0,
-                     subd=2, rattr=None, mattr=None, exclude=None, margin=0.012,
+                     subd=24, rattr=None, mattr=None, exclude=None, margin=0.012,
                      cut=True):
-        """DPF-поры -> эллипсоиды-резаки. rattr — атрибут-множитель радиуса
-        (локальная толщина), mattr — атрибут-маска. exclude — points-облако
-        центров ЧУЖИХ пор: точки ближе r_чужой·pr + r_своя_max + margin
-        сносятся (кромки чужих пор остаются чистыми — без пересечений).
+        """DPF-поры -> резаки. v19: резак — ЦИЛИНДР-БУР (subd = число граней):
+        стенки цилиндра выходят из поверхности почти перпендикулярно ->
+        ровная КРУГЛАЯ кромка (эллипсоид резал по касательной -> гранёные
+        кромки). rattr — атрибут-множитель радиуса (локальная толщина),
+        mattr — атрибут-маска. exclude — points-облако центров ЧУЖИХ пор:
+        точки ближе r_чужой·pr + r_своя_max + margin сносятся (кромки чужих
+        пор остаются чистыми — без пересечений).
         cut=False — только центры (для димплов). Возвращает (резаки|None,
         centers points)."""
         dpf = g.n('GeometryNodeDistributePointsOnFaces',
@@ -626,15 +713,17 @@ def build_gn(name='CoralGN'):
             pts_src = (dele, 0)
         if not cut:
             return None, pts_src
-        ico = g.n('GeometryNodeMeshIcoSphere')
-        ico.inputs['Radius'].default_value = 1.0
-        ico.inputs['Subdivisions'].default_value = subd
+        # v19: цилиндр-бур вместо эллипсоида (гранёные кромки -> круглые):
+        # глубина 2·depth, масштаб (ri,ri,ri) -> залегает на depth·ri вглубь
+        cyl = g.n('GeometryNodeMeshCylinder')
+        cyl.inputs['Vertices'].default_value = subd
+        cyl.inputs['Radius'].default_value = 1.0
+        cyl.inputs['Depth'].default_value = 2.0 * depth
         inst = g.n('GeometryNodeInstanceOnPoints')
         g.link(pts_src, inst, 'Points')
         g.link(dpf, 'Rotation', inst, 'Rotation')   # +Z вдоль нормали
-        g.link(ico, 'Mesh', inst, 'Instance')
-        # эллипсоид: глубина вдоль нормали xdepth -> пробивает стенку и сплавы
-        g.link(g.comb(ri, ri, g.m('MULTIPLY', ri, depth)), inst, 'Scale')
+        g.link(cyl, 'Mesh', inst, 'Instance')
+        g.link(g.comb(ri, ri, ri), inst, 'Scale')   # радиус бура = ri
         rlz = g.n('GeometryNodeRealizeInstances')
         rlz.inputs['Realize All'].default_value = True
         g.link(inst, 'Instances', rlz, 'Geometry')
@@ -653,8 +742,9 @@ def build_gn(name='CoralGN'):
         return (boo, 0)
 
     # A: центры КРУПНЫХ БУРОВ на чистой поверхности (атрибуты pr/mb живы)
-    s1, pts1 = pore_spheres(mask_b, 500.0, S('Pore Spacing'), S('Pore Radius'),
-                            S('Pore Var'), 3, cur, depth=3.8, rattr='pr', mattr='mb')
+    s1, pts1 = pore_spheres(mask_b, 700.0, S('Pore Spacing'), S('Pore Radius'),
+                            S('Pore Var'), 3, cur, depth=3.8, subd=40,
+                            rattr='pr', mattr='mb')
     if os.environ.get('CORAL_STAGE') == 'pts1':
         # счётчик: ico r=0.004 на точки -> realize (42 верша/точка)
         icoD = g.n('GeometryNodeMeshIcoSphere')
@@ -669,8 +759,9 @@ def build_gn(name='CoralGN'):
         stages['pts1'] = (rlzD, 0)
     # A2: центры СРЕДНИХ буров — та же маска, гуще; отсечка от крупных
     if os.environ.get('CORAL_NO_MED', '0') != '1':
-        s1b, pts1b = pore_spheres(mask_b, 800.0, S('Med Spacing'), S('Med Radius'),
-                                  S('Pore Var'), 5, cur, depth=2.0, rattr='pr', mattr='mm',
+        s1b, pts1b = pore_spheres(mask_b, 1200.0, S('Med Spacing'), S('Med Radius'),
+                                  S('Pore Var'), 5, cur, depth=2.0, subd=32,
+                                  rattr='pr', mattr='mm',
                                   exclude=[(pts1, S('Pore Radius'))])
     else:
         s1b, pts1b = None, None
@@ -695,7 +786,7 @@ def build_gn(name='CoralGN'):
         excl2 = [(pts1, S('Pore Radius'))]
         if pts1b is not None:
             excl2.append((pts1b, S('Med Radius')))
-        _s2, pts2 = pore_spheres(mask_f, 2500.0, S('Fine Spacing'), S('Fine Radius'),
+        _s2, pts2 = pore_spheres(mask_f, 4000.0, S('Fine Spacing'), S('Fine Radius'),
                                  S('Pore Var'), int(float(os.environ.get('CORAL_SEED_FINE', '9'))),
                                  cur, depth=1.35, cut=False, mattr='mf', exclude=excl2, margin=0.006)
         if os.environ.get('CORAL_STAGE') == 'pts2':
@@ -733,14 +824,21 @@ def build_gn(name='CoralGN'):
         g.link(cur[0], cur[1], mbd, 'Geometry')
         mbd.inputs['Distance'].default_value = 0.0012
         cur = (mbd, 0)
-    # P: СУБДИВ ПОСЛЕ boolean (сам boolean — по coarse, без мусора), ПОД ДИМПЛАМИ:
-    # ямки получают x4 плотности вершин -> мельче, круглее, без изломов
-    # (плотная губка как на референсе). CORAL_POST_SUBDIV=0 — выкл.
-    if os.environ.get('CORAL_POST_SUBDIV', '1') != '0':
-        sub2 = g.n('GeometryNodeSubdivideMesh')
-        sub2.inputs['Level'].default_value = int(float(os.environ.get('CORAL_POST_SUBDIV', '1')))
+    # P: СУБДИВ ПОСЛЕ boolean (сам boolean — по coarse, без мусора), ПОД ДИМПЛАМИ.
+    # v19: simple SubdivideMesh только добавлял вершины, НЕ гладя позиции —
+    # ямки и кромки оставались многоугольными. CATMULL-CLARK (Subdivision
+    # Surface) relaxing-ом скругляет кромки буров и профили димплов.
+    # CORAL_POST_SUBDIV=0 — выкл.; level 1 = x4 вершин.
+    if os.environ.get('CORAL_POST_SUBDIV', '2') != '0':
+        sub2 = g.n('GeometryNodeSubdivisionSurface')
+        sub2.inputs['Level'].default_value = int(float(os.environ.get('CORAL_POST_SUBDIV', '2')))
         g.link(cur[0], cur[1], sub2, 'Mesh')
         cur = (sub2, 0)
+        # catmull приподнимает кромку footing -> коралл «всплывает» над полом;
+        # клампим z >= 0 — низ возвращается на подиум
+        pz = pos_in(g); sz = g.sep(pz)
+        zc = g.m('MAXIMUM', (sz, 'Z'), 0.0)
+        cur = set_pos(g, cur, g.comb((sz, 'X'), (sz, 'Y'), zc))
     # F: ДИМПЛЫ (мелкие поры) — после boolean, БЕЗ blur за ними: ни одного
     # резака — ни FLOAT-щелей, ни «звёзд», рвани нет в принципе. Кромки буров
     # чисты: их зоны свободны от мелких центров (отсечка в шаге B), ямка туда
@@ -750,8 +848,8 @@ def build_gn(name='CoralGN'):
         g.link(pts2[0], pts2[1], prox2, 'Target')
         r0f = S('Fine Radius')
         fall = g.m('SUBTRACT', 1.0, g.smooth((prox2, 'Distance'),
-                                             g.m('MULTIPLY', r0f, 0.26),
-                                             g.m('MULTIPLY', r0f, 0.74)))
+                                             g.m('MULTIPLY', r0f, 0.20),
+                                             g.m('MULTIPLY', r0f, 0.80)))
         dep = g.m('MULTIPLY', r0f, 1.25)
         offv = g.vec('SCALE', nrm_in(g),
                      scale=g.m('MULTIPLY', dep,
@@ -917,7 +1015,7 @@ def build_scene():
 
 # ---------------------------------------------------------------- main
 def main():
-    print(f'[coral] v18 start LOW={LOW} DIAG={DIAG}', flush=True)
+    print(f'[coral] v19 start LOW={LOW} DIAG={DIAG}', flush=True)
     for o in list(bpy.data.objects):
         bpy.data.objects.remove(o, do_unlink=True)
     obj = build_base_mesh()
