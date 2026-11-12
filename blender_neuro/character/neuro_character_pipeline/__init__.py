@@ -4,14 +4,16 @@ Neuro Character Pipeline — мастер-аддон, связывающий:
   ComfyUI (картинка) -> Image to 3D (меш) -> neuro-скелет (human.json)
   -> X-Muscle System (мышцы) -> neuro-анимация (motion JSON).
 
-N-панель 3D-вьюпорта, категория "Neuro".
+N-панель 3D-вьюпорта, категория "NCP" (короткая вкладка); резервная
+панель — Properties -> Scene. Постоянные настройки (папка движка,
+URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слетают.
 """
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 0, 1),
+    "version": (2, 1, 0),
     "blender": (4, 2, 0),
-    "location": "3D Viewport > N-panel > Neuro",
+    "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
                    "мышцы -> анимация (движки вшиты)",
     "category": "Rigging",
@@ -20,9 +22,11 @@ bl_info = {
 import json
 import importlib
 import os
+import socket
 import subprocess
 import sys
 import time
+from urllib.parse import urlparse
 
 import bpy
 from bpy.props import (BoolProperty, EnumProperty, FloatProperty,
@@ -57,10 +61,69 @@ JOB = {
 }
 
 
+_NCP_BASENAME = (__package__ or "neuro_character_pipeline").rsplit(".", 1)[-1]
+
+COMFY_DEFAULT = "http://127.0.0.1:8188"
+_COMFY_CACHE = {"ts": 0.0, "ok": None}
+
+
+def _get_prefs():
+    """AddonPreferences этого аддона (работает и для bl_ext.*)."""
+    try:
+        addons = bpy.context.preferences.addons
+    except Exception:
+        return None
+    for key in addons.keys():
+        if key.rsplit(".", 1)[-1].lower() == _NCP_BASENAME.lower():
+            try:
+                return addons[key].preferences
+            except Exception:
+                pass
+    return None
+
+
+def _pref_str(name):
+    p = _get_prefs()
+    if p is None:
+        return ""
+    try:
+        return (getattr(p, name, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _comfy_url(st=None):
+    url = _pref_str("comfy_url")
+    if not url and st is not None:
+        url = (getattr(st, "comfy_url", "") or "").strip()
+    return url or COMFY_DEFAULT
+
+
+def _port_open(host, port, timeout=0.6):
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def _comfy_alive_cached():
+    now = time.time()
+    if now - _COMFY_CACHE["ts"] > 6.0:
+        u = urlparse(_comfy_url())
+        _COMFY_CACHE["ts"] = now
+        _COMFY_CACHE["ok"] = _port_open(u.hostname or "127.0.0.1",
+                                        u.port or 8188)
+    return _COMFY_CACHE["ok"]
+
+
 def _out_dir(context):
-    st = context.scene.ncp
-    d = st.out_dir.strip() or os.path.join(os.path.expanduser("~"),
-                                           "NeuroCharacter")
+    d = _pref_str("out_dir")
+    if not d:
+        st = getattr(context.scene, "ncp", None)
+        if st is not None:
+            d = (getattr(st, "out_dir", "") or "").strip()
+    d = d or os.path.join(os.path.expanduser("~"), "NeuroCharacter")
     d = bpy.path.abspath(d)
     os.makedirs(d, exist_ok=True)
     return d
@@ -235,11 +298,12 @@ def _build_rig(context, mesh):
 
 def _start_comfy_job(context, refine, chain_next, chain_muscles):
     st = _st(context)
-    cli = ncp_comfy.ComfyClient(st.comfy_url)
+    url = _comfy_url(st)
+    cli = ncp_comfy.ComfyClient(url)
     if not cli.check():
         raise ncp_comfy.ComfyError(
-            "ComfyUI не отвечает на %s (запустите его или проверьте URL)"
-            % st.comfy_url)
+            "ComfyUI не отвечает на %s (кнопка Start ComfyUI — в секции "
+            "Files & Settings, или запустите ComfyUI сами)" % url)
     wf = ncp_comfy.ComfyClient.load_workflow(
         bpy.path.abspath(st.comfy_workflow) if st.comfy_workflow else "")
     seed = st.seed if st.seed > 0 else ncp_comfy.random_seed()
@@ -514,6 +578,24 @@ class NCP_AddonPrefs(bpy.types.AddonPreferences):
                     "модели (около 25 ГБ). Пусто = ~/3DRedbox/ImageTo3D. "
                     "Это НЕ папка ComfyUI - у движка свой Python-venv",
         update=_engine_dir_update)
+    comfy_url: StringProperty(
+        name="ComfyUI URL", default=COMFY_DEFAULT,
+        description="Адрес ComfyUI API. Хранится постоянно, не слетает "
+                    "между сеансами")
+    out_dir: StringProperty(
+        name="Output dir", subtype="FILE_PATH", default="",
+        description="Куда складывать результаты (пусто = ~/NeuroCharacter)")
+    comfyui_dir: StringProperty(
+        name="ComfyUI folder", subtype="DIR_PATH", default="",
+        description="Папка ComfyUI (где лежит main.py) — нужна только "
+                    "для кнопки Start ComfyUI")
+    comfyui_python: StringProperty(
+        name="Python (ComfyUI)", subtype="FILE_PATH", default="",
+        description="python.exe для запуска ComfyUI: в портативной сборке "
+                    "это <ComfyUI>\\python_embeded\\python.exe")
+    comfyui_port: IntProperty(
+        name="Port", default=8188, min=1024, max=65535,
+        description="Порт автозапуска (должен совпадать с URL)")
 
     def draw(self, context):
         lay = self.layout
@@ -529,6 +611,17 @@ class NCP_AddonPrefs(bpy.types.AddonPreferences):
                   icon="INFO")
         col.label(text="Папка сохраняется навсегда и переживает "
                        "переустановку аддона", icon="CHECKMARK")
+        col = lay.column(align=True)
+        col.label(text="Постоянные настройки конвейера", icon="LOCKED")
+        col.prop(self, "comfy_url")
+        col.prop(self, "out_dir")
+        box = lay.box()
+        box.label(text="Автозапуск ComfyUI", icon="PLAY")
+        box.prop(self, "comfyui_dir")
+        box.prop(self, "comfyui_python")
+        box.prop(self, "comfyui_port")
+        box.operator("ncp.start_comfy", icon="PLAY")
+        lay.operator("ncp.env_report", icon="TEXT")
 
 
 # ----------------------------------------------------------- операторы
@@ -941,6 +1034,185 @@ class NCP_OT_open_out(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _build_env_report(context):
+    L = []
+    add = L.append
+    ver = ".".join(str(x) for x in bl_info["version"])
+    add("Neuro Character Pipeline — отчёт окружения v%s" % ver)
+    add("дата: %s" % time.strftime("%Y-%m-%d %H:%M"))
+    add("blender: %s | python: %s | platform: %s"
+        % (bpy.app.version_string, sys.version.split()[0], sys.platform))
+    add("")
+    add("== включённые аддоны (neuro / image_to_3d / xmuscle) ==")
+    try:
+        keys = sorted(bpy.context.preferences.addons.keys())
+    except Exception as e:
+        keys = []
+        add("  <ошибка: %s>" % e)
+    for k in keys:
+        lk = k.lower()
+        if "neuro" in lk or "image_to_3d" in lk or "img3d" in lk \
+                or "xmuscle" in lk or "xpiemenu" in lk:
+            add("  " + k)
+    if not any(k.rsplit(".", 1)[-1].lower() == _NCP_BASENAME.lower()
+               for k in keys):
+        add("  !!! %s НЕ В СПИСКЕ ВКЛЮЧЁННЫХ АДДОНОВ" % _NCP_BASENAME)
+    add("")
+    add("== физические копии ==")
+    try:
+        dirs = list(bpy.utils.script_paths(submodule="addons"))
+    except Exception:
+        dirs = []
+    for d in dirs:
+        good = os.path.join(d, _NCP_BASENAME, "__init__.py")
+        bad = os.path.join(d, "character", _NCP_BASENAME, "__init__.py")
+        if os.path.isfile(good):
+            add("  OK      " + good)
+        if os.path.isfile(bad):
+            add("  ЛИШНЯЯ  " + bad + "   <- удалите папку character")
+    if not dirs:
+        add("  <не удалось получить пути аддонов>")
+    add("")
+    add("== зарегистрированные классы ==")
+    for t in ("NCP_PT_status", "NCP_PT_pipeline", "NCP_PT_sketch",
+              "NCP_PT_image", "NCP_PT_mesh", "NCP_PT_rig",
+              "NCP_PT_muscles", "NCP_PT_anim", "NCP_PT_settings",
+              "NCP_PT_scene", "NCP_Props"):
+        add("  %-16s %s" % (t, "есть" if hasattr(bpy.types, t) else "НЕТ"))
+    scn = getattr(bpy.context, "scene", None)
+    st = getattr(scn, "ncp", None)
+    add("  Scene.ncp: %s" % ("None (!)" if st is None else "ok"))
+    add("")
+    add("== ошибки регистрации ==")
+    if REGISTER_ERRORS:
+        for line in REGISTER_ERRORS:
+            add("  " + line)
+    else:
+        add("  нет")
+    add("")
+    add("== вшитые движки (vendor) ==")
+    if VENDOR_STATUS:
+        for name, err in VENDOR_STATUS.items():
+            add("  %-8s %s" % (name, err or "ок"))
+    else:
+        add("  <не регистрировались>")
+    legacy = _legacy_conflicts()
+    add("  старые раздельные копии: %s"
+        % (", ".join(legacy) if legacy else "нет"))
+    add("")
+    add("== ComfyUI ==")
+    add("  url: %s | отвечает: %s"
+        % (_comfy_url(), "да" if _comfy_alive_cached() else "НЕТ"))
+    p = _get_prefs()
+    if p is not None:
+        add("  comfyui_dir: %r" % (getattr(p, "comfyui_dir", "") or ""))
+        add("  comfyui_python: %r" % (getattr(p, "comfyui_python", "") or ""))
+        add("  engine_dir: %r" % (getattr(p, "engine_dir", "") or ""))
+        add("  out_dir: %r" % (getattr(p, "out_dir", "") or ""))
+    else:
+        add("  <AddonPreferences недоступны>")
+    add("")
+    add("== NCP статус в сцене ==")
+    if st is not None:
+        add("  state: %s | status: %s" % (st.state, st.status[:100]))
+    return "\n".join(L)
+
+
+class NCP_OT_start_comfy(bpy.types.Operator):
+    bl_idname = "ncp.start_comfy"
+    bl_label = "Start ComfyUI"
+    bl_description = ("Запустить ComfyUI указанным Python (папку ComfyUI "
+                      "и python.exe задайте в Files & Settings). Если "
+                      "ComfyUI уже отвечает — ничего не делает")
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        d = bpy.path.abspath(_pref_str("comfyui_dir"))
+        py = bpy.path.abspath(_pref_str("comfyui_python"))
+        port = 8188
+        p = _get_prefs()
+        if p is not None:
+            port = int(getattr(p, "comfyui_port", 8188) or 8188)
+        if not d or not os.path.isdir(d):
+            self.report({"ERROR"}, "Укажите папку ComfyUI в настройках "
+                                   "(N-панель -> Files & Settings)")
+            return {"CANCELLED"}
+        if not os.path.isfile(os.path.join(d, "main.py")):
+            self.report({"ERROR"}, "В папке нет main.py: %s" % d)
+            return {"CANCELLED"}
+        if not py or not os.path.isfile(py):
+            self.report({"ERROR"}, "Укажите python.exe (например "
+                                   "<ComfyUI>\\python_embeded\\python.exe)")
+            return {"CANCELLED"}
+        if _port_open("127.0.0.1", port):
+            self.report({"INFO"}, "ComfyUI уже отвечает на порту %d" % port)
+            return {"FINISHED"}
+        log = os.path.join(_out_dir(context), "comfyui_console.log")
+        kw = {}
+        if sys.platform == "win32":
+            kw["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+        try:
+            with open(log, "a", encoding="utf-8") as lf:
+                subprocess.Popen(
+                    [py, "-s", "main.py", "--listen", "127.0.0.1",
+                     "--port", str(port)],
+                    cwd=d, stdout=lf, stderr=subprocess.STDOUT, **kw)
+        except Exception as e:
+            self.report({"ERROR"}, "Запуск не удался: %s" % e)
+            return {"CANCELLED"}
+        self.report({"INFO"}, "ComfyUI запускается на порту %d (лог: %s). "
+                              "Подождите полминуты" % (port, log))
+        return {"FINISHED"}
+
+
+class NCP_OT_env_report(bpy.types.Operator):
+    bl_idname = "ncp.env_report"
+    bl_label = "Env Report"
+    bl_description = ("Собрать отчёт окружения (что включено, какие копии "
+                      "аддона, ошибки регистрации) в файл ~/ncp_report.txt "
+                      "и показать его в Text Editor")
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        return True
+
+    def execute(self, context):
+        text = _build_env_report(context)
+        path = os.path.join(os.path.expanduser("~"), "ncp_report.txt")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+        except Exception as e:
+            self.report({"ERROR"}, "Не удалось записать %s: %s" % (path, e))
+            return {"CANCELLED"}
+        print(text)  # дубль в системную консоль
+        try:
+            txt = bpy.data.texts.get("ncp_report.txt")
+            if txt is None:
+                txt = bpy.data.texts.new("ncp_report.txt")
+            txt.clear()
+            txt.write(text)
+            for w in bpy.context.window_manager.windows:
+                for a in w.screen.areas:
+                    if a.type not in {"TEXT_EDITOR", "CONSOLE", "INFO"}:
+                        continue
+                    a.type = "TEXT_EDITOR"
+                    a.spaces.active.text = txt
+                    break
+                else:
+                    continue
+                break
+        except Exception:
+            pass
+        self.report({"INFO"}, "Отчёт: %s (и в Text Editor)" % path)
+        return {"FINISHED"}
+
+
 # ------------------------------------------------------------- панель
 # Стиль повторяет язык дизайна Image to 3D: карточка статуса, трекер
 # шагов с чекмарками, крупные главные кнопки, сворачиваемые секции.
@@ -1062,25 +1334,54 @@ def _status_card(lay, context, st):
         c2.label(text=name)
 
 
-class _NCPSubPanel(bpy.types.Panel):
+class _NCPGuard:
+    """draw()/draw_header() не бросают исключений: Blender прячет панель,
+    если draw упал, — вместо этого показываем ошибку и Env Report."""
+
+    def _content(self, context):
+        raise NotImplementedError
+
+    def _head(self, context):
+        pass
+
+    def draw(self, context):
+        try:
+            self._content(context)
+        except Exception as e:
+            lay = self.layout
+            box = lay.box()
+            box.alert = True
+            box.label(text="Ошибка интерфейса NCP", icon="ERROR")
+            box.label(text=("%s: %s" % (type(e).__name__, e))[:90])
+            box.operator("ncp.env_report", text="Env Report", icon="TEXT")
+
+    def draw_header(self, context):
+        try:
+            self._head(context)
+        except Exception:
+            self.layout.label(icon="ERROR")
+
+
+class _NCPSubPanel(_NCPGuard, bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "Neuro"
+    bl_category = "NCP"
     bl_parent_id = "NCP_PT_pipeline"
     bl_options = {"DEFAULT_CLOSED"}
 
 
-class NCP_PT_pipeline(bpy.types.Panel):
+class NCP_PT_pipeline(_NCPGuard, bpy.types.Panel):
     bl_label = "Character Pipeline"
     bl_idname = "NCP_PT_pipeline"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
-    bl_category = "Neuro"
+    bl_category = "NCP"
+    bl_order = 1
 
-    def draw_header(self, context):
+    def _head(self, context):
         self.layout.label(icon="USER")
 
-    def draw(self, context):
+    def _content(self, context):
         st = context.scene.ncp
         lay = self.layout
         for w in REGISTER_ERRORS:
@@ -1100,12 +1401,12 @@ class NCP_PT_sketch(_NCPSubPanel):
     bl_label = "1 · Sketch"
     bl_idname = "NCP_PT_sketch"
 
-    def draw_header(self, context):
+    def _head(self, context):
         st = context.scene.ncp
         self.layout.label(icon="CHECKMARK" if st.sketch_path
                           else "BRUSHES_ALL")
 
-    def draw(self, context):
+    def _content(self, context):
         st = context.scene.ncp
         lay = self.layout
         lay.prop(st, "sketch_path")
@@ -1122,19 +1423,19 @@ class NCP_PT_image(_NCPSubPanel):
     bl_label = "2 · Image (ComfyUI)"
     bl_idname = "NCP_PT_image"
 
-    def draw_header(self, context):
+    def _head(self, context):
         st = context.scene.ncp
         ok = bool(st.image_path and os.path.isfile(
             bpy.path.abspath(st.image_path)))
         self.layout.label(icon="CHECKMARK" if ok else "IMAGE_DATA")
 
-    def draw(self, context):
+    def _content(self, context):
         st = context.scene.ncp
         lay = self.layout
         lay.prop(st, "prompt")
         lay.prop(st, "negative")
-        lay.prop(st, "comfy_url")
         lay.prop(st, "comfy_workflow")
+        _hint(lay, "ComfyUI URL — в Files & Settings, хранится постоянно")
         row = lay.row(align=True)
         row.operator("ncp.pick_image", text="Pick Image", icon="EYEDROPPER")
         _big(lay, "ncp.generate_image", "Generate Image", icon="IMAGE_DATA")
@@ -1145,13 +1446,13 @@ class NCP_PT_mesh(_NCPSubPanel):
     bl_label = "3 · Mesh (Image to 3D)"
     bl_idname = "NCP_PT_mesh"
 
-    def draw_header(self, context):
+    def _head(self, context):
         mesh_ok = any(o.type == "MESH" and (o.get("ncp_mesh")
                                             or o.get("img3d_image"))
                       for o in bpy.data.objects)
         self.layout.label(icon="CHECKMARK" if mesh_ok else "MESH_MONKEY")
 
-    def draw(self, context):
+    def _content(self, context):
         st = context.scene.ncp
         lay = self.layout
         mod, ready = _i3d_ready(context)
@@ -1184,11 +1485,11 @@ class NCP_PT_rig(_NCPSubPanel):
     bl_label = "4 · Neuro Skeleton"
     bl_idname = "NCP_PT_rig"
 
-    def draw_header(self, context):
+    def _head(self, context):
         has_arm = bpy.data.objects.get("NeuroCharacter") is not None
         self.layout.label(icon="CHECKMARK" if has_arm else "ARMATURE_DATA")
 
-    def draw(self, context):
+    def _content(self, context):
         st = context.scene.ncp
         lay = self.layout
         lay.prop(st, "spec_path")
@@ -1212,11 +1513,11 @@ class NCP_PT_muscles(_NCPSubPanel):
     bl_label = "5 · Muscles (X-Muscle)"
     bl_idname = "NCP_PT_muscles"
 
-    def draw_header(self, context):
+    def _head(self, context):
         self.layout.label(icon="CHECKMARK" if ncp_muscles.muscle_objects()
                           else "MOD_SOFT")
 
-    def draw(self, context):
+    def _content(self, context):
         st = context.scene.ncp
         lay = self.layout
         if not ncp_muscles.installed():
@@ -1240,13 +1541,13 @@ class NCP_PT_anim(_NCPSubPanel):
     bl_label = "6 · Animation (neurosim)"
     bl_idname = "NCP_PT_anim"
 
-    def draw_header(self, context):
+    def _head(self, context):
         arm = bpy.data.objects.get("NeuroCharacter")
         ok = bool(arm is not None and arm.animation_data
                   and arm.animation_data.action)
         self.layout.label(icon="CHECKMARK" if ok else "PLAY")
 
-    def draw(self, context):
+    def _content(self, context):
         st = context.scene.ncp
         lay = self.layout
         lay.prop(st, "frame_step")
@@ -1259,15 +1560,36 @@ class NCP_PT_settings(_NCPSubPanel):
     bl_label = "Files & Settings"
     bl_idname = "NCP_PT_settings"
 
-    def draw_header(self, context):
+    def _head(self, context):
         self.layout.label(icon="PREFERENCES")
 
-    def draw(self, context):
+    def _content(self, context):
         st = context.scene.ncp
         lay = self.layout
-        lay.prop(st, "out_dir")
-        lay.prop(st, "comfy_timeout")
-        lay.operator("ncp.open_out", icon="FILE_FOLDER")
+        p = _get_prefs()
+        if p is None:
+            lay.prop(st, "out_dir")
+            lay.prop(st, "comfy_timeout")
+            lay.operator("ncp.open_out", icon="FILE_FOLDER")
+            _hint(lay, "Настройки аддона не читаются — нажмите Env Report")
+        else:
+            lay.label(text="Постоянные настройки", icon="LOCKED")
+            lay.prop(p, "comfy_url")
+            lay.prop(p, "out_dir")
+            lay.prop(st, "comfy_timeout")
+            lay.operator("ncp.open_out", text="Open Output Folder",
+                         icon="FILE_FOLDER")
+            lay.separator()
+            box = lay.box()
+            box.label(text="Автозапуск ComfyUI", icon="PLAY")
+            box.prop(p, "comfyui_dir")
+            box.prop(p, "comfyui_python")
+            box.prop(p, "comfyui_port")
+            lay.operator("ncp.start_comfy", text="Start ComfyUI",
+                         icon="PLAY")
+            lay.operator("ncp.env_report", text="Env Report", icon="TEXT")
+            _hint(lay, "comfyui_python — путь к python.exe ComfyUI "
+                       "(например python_embeded\\python.exe)")
         # папка движка и моделей вшитого Image to 3D (хранится в Preferences,
         # не сбрасывается при закрытии Blender)
         if ncp_img3d.installed():
@@ -1289,6 +1611,80 @@ class NCP_PT_settings(_NCPSubPanel):
         _hint(lay, "Подробности и схематика — INSTALL_RU.txt рядом с аддоном")
 
 
+class NCP_PT_status(_NCPGuard, bpy.types.Panel):
+    """Панель-маяк: не трогает scene-пропсы, рисуется всегда.
+    Если вы видите только её — сломан остальной интерфейс, и кнопка
+    Env Report соберёт причину в файл ~/ncp_report.txt."""
+    bl_label = "Neuro Character"
+    bl_idname = "NCP_PT_status"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "NCP"
+    bl_order = 0
+
+    def _head(self, context):
+        self.layout.label(icon="USER")
+
+    def _content(self, context):
+        lay = self.layout
+        ver = ".".join(str(x) for x in bl_info["version"])
+        lay.label(text="NCP v%s — интерфейс работает" % ver,
+                  icon="CHECKMARK")
+        if REGISTER_ERRORS:
+            box = lay.box()
+            box.alert = True
+            box.label(text="Проблемы регистрации:", icon="ERROR")
+            for line in REGISTER_ERRORS[:3]:
+                box.label(text=line[:90])
+            if len(REGISTER_ERRORS) > 3:
+                box.label(text="... и ещё %d (см. Env Report)"
+                          % (len(REGISTER_ERRORS) - 3))
+        for w in _vendor_warnings()[:2]:
+            row = lay.row()
+            row.alert = True
+            row.label(text=w[:90], icon="ERROR")
+        ok = _comfy_alive_cached()
+        lay.label(text="ComfyUI: %s" % ("отвечает" if ok else "не запущен"),
+                  icon="CHECKMARK" if ok else "ERROR")
+        row = lay.row(align=True)
+        row.operator("ncp.start_comfy", text="Start ComfyUI", icon="PLAY")
+        row.operator("ncp.env_report", text="", icon="TEXT")
+        if not ncp_img3d.installed():
+            _hint(lay, "Image to 3D не включён — меш строить нечем")
+        _big(lay, "ncp.run_all", "FULL CYCLE", icon="PLAY")
+
+
+class NCP_PT_scene(_NCPGuard, bpy.types.Panel):
+    """Резервная панель в Properties -> Scene: видна всегда, даже если
+    вкладка N-панели перекрыта другими аддонами."""
+    bl_label = "Neuro Character Pipeline"
+    bl_idname = "NCP_PT_scene"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "scene"
+
+    def _head(self, context):
+        self.layout.label(icon="USER")
+
+    def _content(self, context):
+        lay = self.layout
+        st = getattr(context.scene, "ncp", None)
+        if st is None:
+            lay.label(text="Scene.ncp недоступен", icon="ERROR")
+        elif st.status:
+            srow = lay.row()
+            if st.state == "ERROR":
+                srow.alert = True
+            srow.label(text=st.status[:80],
+                       icon="ERROR" if st.state == "ERROR" else "INFO")
+        col = lay.column(align=True)
+        col.operator("ncp.run_all", text="FULL CYCLE", icon="PLAY")
+        col.operator("ncp.build_skeleton", text="Build Skeleton",
+                     icon="ARMATURE_DATA")
+        col.operator("ncp.env_report", text="Env Report", icon="TEXT")
+        _hint(lay, "Основной интерфейс — 3D-вьюпорт, клавиша N, вкладка NCP")
+
+
 # ----------------------------------------------------------- регистрация
 
 classes = (
@@ -1302,6 +1698,8 @@ classes = (
     NCP_OT_generate_mesh,
     NCP_OT_install_engine,
     NCP_OT_dl_models,
+    NCP_OT_start_comfy,
+    NCP_OT_env_report,
     NCP_OT_build_skeleton,
     NCP_OT_add_muscles,
     NCP_OT_attach_muscles,
@@ -1310,6 +1708,7 @@ classes = (
     NCP_OT_run_all,
     NCP_OT_cancel,
     NCP_OT_open_out,
+    NCP_PT_status,
     NCP_PT_pipeline,
     NCP_PT_sketch,
     NCP_PT_image,
@@ -1318,6 +1717,7 @@ classes = (
     NCP_PT_muscles,
     NCP_PT_anim,
     NCP_PT_settings,
+    NCP_PT_scene,
 )
 
 

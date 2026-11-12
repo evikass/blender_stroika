@@ -26,7 +26,22 @@ NEURO CHARACTER PIPELINE (All-in-One) — установка и запуск
 2) Edit -> Preferences -> Add-ons -> Install from Disk
    -> выбрать neuro_character_pipeline.zip
 3) Включить галочку Neuro Character Pipeline (одну!).
-4) Открыть 3D-вьюпорт -> клавиша N -> вкладка "Neuro" -> Character Pipeline
+4) Открыть 3D-вьюпорт -> клавиша N -> вкладка "NCP" (короткое название,
+   раньше была "Neuro"). Резервный интерфейс: Properties -> вкладка
+   Scene -> панель "Neuro Character Pipeline" — там FULL CYCLE, даже
+   если вкладку N-панели не видно за другими аддонами.
+
+PYTHON И АВТОЗАПУСК COMFYUI (новое в 2.1.0)
+--------------------------------------------
+В панели NCP -> Files & Settings теперь есть:
+- ComfyUI URL и Output dir — хранятся в Preferences, больше не слетают;
+- ComfyUI folder — папка ComfyUI (где лежит main.py);
+- Python (ComfyUI) — путь к python.exe, в портативной сборке это
+  <ComfyUI>\python_embeded\python.exe;
+- кнопка Start ComfyUI — сама запускает ComfyUI на указанном порту
+  (лог: <Output dir>\comfyui_console.log). Если ComfyUI уже отвечает —
+  ничего не делает.
+Всё то же самое есть в Preferences -> Add-ons -> Neuro Character Pipeline.
 
 Подготовка ComfyUI (шаги 1-2)
 -----------------------------
@@ -46,7 +61,7 @@ NEURO CHARACTER PIPELINE (All-in-One) — установка и запуск
 
 КУДА КАЧАЮТСЯ МОДЕЛИ (папка движка):
 - По умолчанию: ~/3DRedbox/ImageTo3D (C:\Users\<вы>\3DRedbox\ImageTo3D).
-- Своя папка (любой диск): панель Neuro -> Files & Settings ->
+- Своя папка (любой диск): панель NCP -> Files & Settings ->
   блок Engine & Models Folder -> кнопка Choose Folder.
   Или: Preferences -> Add-ons -> Neuro Character Pipeline ->
   поле Engine & Models Folder.
@@ -69,16 +84,22 @@ NEURO CHARACTER PIPELINE (All-in-One) — установка и запуск
    — оставьте ОДНУ (лучше новую, установленную из zip).
 3) Перезапустите Blender, установите новый zip, включите галочку.
 
-Если вкладка "Neuro" не появилась
----------------------------------
-1) Откройте Window -> Toggle System Console (Windows) — аддон печатает
+Если вкладка "NCP" не появилась
+-------------------------------
+1) F3 (поиск оператора) -> набрать "env" -> запустить "Env Report".
+   Отчёт запишется в C:\Users\<вы>\ncp_report.txt и откроется в
+   Text Editor внутри Blender — пришлите его целиком.
+2) В 3D-вьюпорте панель "Neuro Character" (NCP v...) рисуется ВСЕГДА
+   и не зависит от остальных секций. Если видна только она —
+   остальной интерфейс упал, и Env Report скажет, почему.
+3) Откройте Window -> Toggle System Console (Windows) — аддон печатает
    туда причину (например, "часть классов не поднялась").
-2) Почти всегда причина — вторая копия аддона с теми же классами или
+4) Почти всегда причина — вторая копия аддона с теми же классами или
    недовключённый старый Image to 3D. Удалите старые копии, перезапустите
    Blender, включите одну копию.
-3) Если в панели видна красная строка "Вторая копия аддона? ..." —
+5) Если в панели видна красная строка "Вторая копия аддона? ..." —
    это оно: перезапуск Blender после удаления старых копий.
-4) Проверить установку можно и скриптом ncp_doctor.py (Text Editor ->
+6) Проверить установку можно и скриптом ncp_doctor.py (Text Editor ->
    Open -> Run): он покажет, какая копия откуда загрузилась.
 
 Полный цикл
