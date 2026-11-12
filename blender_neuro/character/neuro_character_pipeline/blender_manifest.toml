@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "neuro_character_pipeline"
-version = "1.0.0"
+version = "1.1.0"
 name = "Neuro Character Pipeline"
 tagline = "Image to 3D mesh, neuro skeleton, X-Muscle, motion"
 maintainer = "blender_neuro"

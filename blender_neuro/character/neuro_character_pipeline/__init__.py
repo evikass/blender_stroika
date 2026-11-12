@@ -9,7 +9,7 @@ N-панель 3D-вьюпорта, категория "Neuro".
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > Neuro",
     "description": "Картинка -> 3D-меш -> neuro-скелет -> мышцы -> анимация",
@@ -732,7 +732,70 @@ class NCP_OT_run_all(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class NCP_OT_cancel(bpy.types.Operator):
+    bl_idname = "ncp.cancel"
+    bl_label = "Cancel"
+    bl_description = "Прервать текущий шаг конвейера (ComfyUI/меш/мышцы)"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        return JOB["active"]
+
+    def execute(self, context):
+        JOB.update(active=False, phase="", next="", comfy=None)
+        st = _st(context)
+        st.state = "IDLE"
+        st.status = "Отменено пользователем"
+        self.report({"INFO"}, "Конвейер остановлен")
+        return {"FINISHED"}
+
+
+class NCP_OT_open_out(bpy.types.Operator):
+    bl_idname = "ncp.open_out"
+    bl_label = "Open Output Folder"
+    bl_description = ("Открыть папку результатов (эскизы, картинки) "
+                      "в проводнике")
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        d = _out_dir(context)
+        try:
+            if sys.platform == "win32":
+                os.startfile(d)  # noqa
+            else:
+                subprocess.Popen(["xdg-open", d])
+        except Exception as e:
+            self.report({"ERROR"}, "Не удалось открыть папку: %s" % e)
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
 # ------------------------------------------------------------- панель
+# Стиль повторяет язык дизайна Image to 3D: карточка статуса, трекер
+# шагов с чекмарками, крупные главные кнопки, сворачиваемые секции.
+# Кнопки EN, подсказки RU — как и раньше.
+
+PHASE_RU = {
+    "COMFY_IMG": "ComfyUI: генерация картинки",
+    "COMFY_REFINE": "ComfyUI: уточнение эскиза",
+    "MESH": "Image to 3D: генерация меша",
+    "MUSCLES": "X-Muscle: расстановка мышц",
+}
+
+# (ключ, имя в трекере, иконка секции)
+STEPS = (
+    ("sketch", "Sketch", "BRUSHES_ALL"),
+    ("image", "Image", "IMAGE_DATA"),
+    ("mesh", "Mesh", "MESH_MONKEY"),
+    ("rig", "Rig", "ARMATURE_DATA"),
+    ("muscles", "Musc", "MOD_SOFT"),
+    ("anim", "Anim", "PLAY"),
+)
+
+TRACKER_ICON = {"done": "CHECKMARK", "active": "PLAY",
+                "pending": "BLANK1"}
+
 
 def _i3d_ready(context):
     mod = ncp_img3d.resolve()
@@ -742,103 +805,285 @@ def _i3d_ready(context):
     return mod, ready
 
 
+def _step_flags(context, st):
+    """Что уже готово (для трекера и иконок секций)."""
+    mesh_ok = (any(o.type == "MESH" and (o.get("ncp_mesh")
+                                         or o.get("img3d_image"))
+                   for o in bpy.data.objects)
+               or bpy.data.objects.get("Character_Mesh") is not None)
+    arm = bpy.data.objects.get("NeuroCharacter")
+    anim_ok = bool(arm is not None and arm.animation_data
+                   and arm.animation_data.action)
+    return {
+        "sketch": bool(st.sketch_path),
+        "image": bool(st.image_path and os.path.isfile(
+            bpy.path.abspath(st.image_path))),
+        "mesh": mesh_ok,
+        "rig": arm is not None,
+        "muscles": bool(ncp_muscles.muscle_objects()),
+        "anim": anim_ok,
+    }
+
+
+def _tracker_states(flags, phase):
+    """(состояние, ключ) для каждого шага: done / active / pending."""
+    act = {"COMFY_IMG": "image", "COMFY_REFINE": "sketch", "MESH": "mesh",
+           "MUSCLES": "muscles"}.get(phase, "")
+    out = []
+    for key, _name, _icon in STEPS:
+        if key == act:
+            out.append(("active", key))
+        elif flags.get(key):
+            out.append(("done", key))
+        else:
+            out.append(("pending", key))
+    return out
+
+
+def _hint(lay, text, icon="DOT"):
+    row = lay.row()
+    row.scale_y = 0.75
+    row.label(text=text, icon=icon)
+
+
+def _big(lay, op_id, text, icon=None):
+    row = lay.row()
+    row.scale_y = 1.45
+    return row.operator(op_id, text=text, icon=icon)
+
+
+def _status_card(lay, context, st):
+    box = lay.box()
+    row = box.row(align=True)
+    row.scale_y = 1.2
+    if st.state == "ERROR":
+        row.alert = True
+        row.label(text="Ошибка", icon="ERROR")
+    elif st.state == "DONE":
+        row.label(text="Готово", icon="CHECKMARK")
+    elif st.state in PHASE_RU:
+        sec = max(0, int(time.time() - JOB.get("t0", time.time())))
+        row.label(text="%s  (%d:%02d)" % (PHASE_RU[st.state], sec // 60,
+                                          sec % 60), icon="TIME")
+    else:
+        row.label(text="Конвейер персонажа", icon="USER")
+    if JOB["active"]:
+        row.operator("ncp.cancel", text="", icon="X")
+    if st.status:
+        srow = box.row()
+        srow.scale_y = 0.8
+        if st.state == "ERROR":
+            srow.alert = True
+        srow.label(text=st.status[:100])
+    # трекер: 6 шагов, иконки состояния + подписи
+    flags = _step_flags(context, st)
+    states = _tracker_states(flags, JOB["phase"])
+    icons_row = box.row(align=True)
+    names_row = box.row(align=True)
+    for (state, _key), (_k, name, _icon) in zip(states, STEPS):
+        c1 = icons_row.row(align=True)
+        c1.alignment = "CENTER"
+        c1.ui_units_x = 1.9
+        c1.label(text="", icon=TRACKER_ICON[state])
+        c2 = names_row.row(align=True)
+        c2.alignment = "CENTER"
+        c2.ui_units_x = 1.9
+        c2.scale_y = 0.7
+        c2.label(text=name)
+
+
+class _NCPSubPanel(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Neuro"
+    bl_parent_id = "NCP_PT_pipeline"
+    bl_options = {"DEFAULT_CLOSED"}
+
+
 class NCP_PT_pipeline(bpy.types.Panel):
     bl_label = "Character Pipeline"
+    bl_idname = "NCP_PT_pipeline"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "Neuro"
 
+    def draw_header(self, context):
+        self.layout.label(icon="USER")
+
     def draw(self, context):
         st = context.scene.ncp
         lay = self.layout
+        _status_card(lay, context, st)
+        _big(lay, "ncp.run_all", "FULL CYCLE", icon="PLAY")
+        _hint(lay, "Всё одной кнопкой: картинка -> меш -> скелет -> мышцы")
 
-        # --- статус
-        box = lay.box()
-        row = box.row(align=True)
-        icon = {"DONE": "CHECKMARK", "ERROR": "ERROR",
-                "IDLE": "PLAY"}.get(st.state, "TIME")
-        row.operator("ncp.run_all", icon="PLAY")
-        if st.status:
-            sub = box.row()
-            sub.label(text=st.status[:96], icon=icon)
-            sub.scale_y = 0.8
 
-        # --- 1. эскиз
-        box = lay.box()
-        box.label(text="1. Sketch", icon="BRUSHES_ALL")
-        box.prop(st, "sketch_path")
-        row = box.row(align=True)
-        row.operator("ncp.new_sketch", text="New")
-        row.operator("ncp.open_sketch", text="Open in Krita")
-        box.operator("ncp.refine_sketch", icon="SHADERFX")
-        box.prop(st, "krita_path")
+class NCP_PT_sketch(_NCPSubPanel):
+    bl_label = "1 · Sketch"
+    bl_idname = "NCP_PT_sketch"
 
-        # --- 2. картинка
-        box = lay.box()
-        box.label(text="2. Image (ComfyUI)", icon="IMAGE_DATA")
-        box.prop(st, "comfy_url")
-        box.prop(st, "comfy_workflow")
-        box.prop(st, "prompt")
-        box.prop(st, "negative")
-        row = box.row(align=True)
-        row.operator("ncp.pick_image", text="Pick Image")
-        row.operator("ncp.generate_image", text="Generate Image")
-        box.prop(st, "image_path")
-        box.prop(st, "comfy_timeout")
-        box.prop(st, "out_dir")
+    def draw_header(self, context):
+        st = context.scene.ncp
+        self.layout.label(icon="CHECKMARK" if st.sketch_path
+                          else "BRUSHES_ALL")
 
-        # --- 3. меш
-        box = lay.box()
-        box.label(text="3. Mesh (Image to 3D)", icon="MESH_MONKEY")
+    def draw(self, context):
+        st = context.scene.ncp
+        lay = self.layout
+        lay.prop(st, "sketch_path")
+        row = lay.row(align=True)
+        row.operator("ncp.new_sketch", text="New", icon="ADD")
+        row.operator("ncp.open_sketch", text="Open in Krita",
+                     icon="FILE_FOLDER")
+        lay.prop(st, "krita_path")
+        _big(lay, "ncp.refine_sketch", "Refine via ComfyUI", icon="SHADERFX")
+        _hint(lay, "Эскиз превратится в рендер персонажа (img2img)")
+
+
+class NCP_PT_image(_NCPSubPanel):
+    bl_label = "2 · Image (ComfyUI)"
+    bl_idname = "NCP_PT_image"
+
+    def draw_header(self, context):
+        st = context.scene.ncp
+        ok = bool(st.image_path and os.path.isfile(
+            bpy.path.abspath(st.image_path)))
+        self.layout.label(icon="CHECKMARK" if ok else "IMAGE_DATA")
+
+    def draw(self, context):
+        st = context.scene.ncp
+        lay = self.layout
+        lay.prop(st, "prompt")
+        lay.prop(st, "negative")
+        lay.prop(st, "comfy_url")
+        lay.prop(st, "comfy_workflow")
+        row = lay.row(align=True)
+        row.operator("ncp.pick_image", text="Pick Image", icon="EYEDROPPER")
+        _big(lay, "ncp.generate_image", "Generate Image", icon="IMAGE_DATA")
+        _hint(lay, "Промпт уйдёт в первую текстовую ноду workflow")
+
+
+class NCP_PT_mesh(_NCPSubPanel):
+    bl_label = "3 · Mesh (Image to 3D)"
+    bl_idname = "NCP_PT_mesh"
+
+    def draw_header(self, context):
+        mesh_ok = any(o.type == "MESH" and (o.get("ncp_mesh")
+                                            or o.get("img3d_image"))
+                      for o in bpy.data.objects)
+        self.layout.label(icon="CHECKMARK" if mesh_ok else "MESH_MONKEY")
+
+    def draw(self, context):
+        st = context.scene.ncp
+        lay = self.layout
         mod, ready = _i3d_ready(context)
         if mod is None:
-            box.label(text="Image to 3D не включён", icon="ERROR")
-        box.prop(st, "engine")
-        row = box.row(align=True)
+            row = lay.row()
+            row.alert = True
+            row.label(text="Image to 3D не включён", icon="ERROR")
+            _hint(lay, "Установите и включите аддон Image to 3D")
+        else:
+            lay.label(text="Движок и модели готовы" if ready
+                      else "Нужно установить/докачать движок",
+                      icon="CHECKMARK" if ready else "ERROR")
+        lay.prop(st, "engine")
+        row = lay.row(align=True)
         row.prop(st, "quality")
         row.prop(st, "texture")
-        row = box.row(align=True)
+        row = lay.row(align=True)
         row.prop(st, "faces")
         row.prop(st, "seed")
-        box.operator("ncp.generate_mesh", icon="MESH_DATA")
+        _big(lay, "ncp.generate_mesh", "Generate Mesh", icon="MESH_MONKEY")
         if mod is not None and not ready:
-            row = box.row(align=True)
-            row.operator("ncp.install_engine", text="Install Engine")
-            row.operator("ncp.dl_models", text="Download Models")
+            row = lay.row(align=True)
+            row.operator("ncp.install_engine", text="Install Engine",
+                         icon="ADD")
+            row.operator("ncp.dl_models", text="Download Models",
+                         icon="DOWNARROW_HLT")
 
-        # --- 4. скелет
-        box = lay.box()
+
+class NCP_PT_rig(_NCPSubPanel):
+    bl_label = "4 · Neuro Skeleton"
+    bl_idname = "NCP_PT_rig"
+
+    def draw_header(self, context):
         has_arm = bpy.data.objects.get("NeuroCharacter") is not None
-        box.label(text="4. Neuro Skeleton %s"
-                  % ("[ok]" if has_arm else ""), icon="ARMATURE_DATA")
-        box.prop(st, "spec_path")
-        box.operator("ncp.build_skeleton")
-        row = box.row(align=True)
+        self.layout.label(icon="CHECKMARK" if has_arm else "ARMATURE_DATA")
+
+    def draw(self, context):
+        st = context.scene.ncp
+        lay = self.layout
+        lay.prop(st, "spec_path")
+        _big(lay, "ncp.build_skeleton", "Build Skeleton",
+             icon="ARMATURE_DATA")
+        row = lay.row(align=True)
         row.prop(st, "mesh_rot_x")
         row.prop(st, "replace_existing", text="Replace")
-        box.prop(st, "apply_transforms")
+        lay.prop(st, "apply_transforms")
+        _hint(lay, "human.json: 18 костей, меш подгонится, автовесы")
 
-        # --- 5. мышцы
-        box = lay.box()
-        n_mus = len(ncp_muscles.muscle_objects())
+
+class NCP_PT_muscles(_NCPSubPanel):
+    bl_label = "5 · Muscles (X-Muscle)"
+    bl_idname = "NCP_PT_muscles"
+
+    def draw_header(self, context):
+        self.layout.label(icon="CHECKMARK" if ncp_muscles.muscle_objects()
+                          else "MOD_SOFT")
+
+    def draw(self, context):
+        st = context.scene.ncp
+        lay = self.layout
         if not ncp_muscles.installed():
-            box.label(text="X-Muscle System не включён", icon="ERROR")
-        box.label(text="5. Muscles (X-Muscle) %s"
-                  % ("[%d]" % n_mus if n_mus else ""), icon="MOD_SOFT")
-        box.prop(st, "muscle_style")
-        row = box.row(align=True)
-        row.operator("ncp.add_muscles", text="Add Muscles")
-        row.operator("ncp.attach_muscles", text="Attach")
-        row.operator("ncp.bake_muscles", text="Bake")
-        box.prop(st, "attach_skin")
+            row = lay.row()
+            row.alert = True
+            row.label(text="X-Muscle System не включён (Blender 5.0)",
+                      icon="ERROR")
+        else:
+            lay.label(text="Мышц в сцене: %d"
+                      % len(ncp_muscles.muscle_objects()), icon="MOD_SOFT")
+        lay.prop(st, "muscle_style")
+        lay.prop(st, "attach_skin")
+        _big(lay, "ncp.add_muscles", "Add Muscles (13 групп)", icon="ADD")
+        row = lay.row(align=True)
+        row.operator("ncp.attach_muscles", text="Attach to Skin",
+                     icon="LINKED")
+        row.operator("ncp.bake_muscles", text="Bake", icon="RENDER_ANIM")
 
-        # --- 6. анимация
-        box = lay.box()
-        box.label(text="6. Animation (neurosim)", icon="ARMATURE_WARN")
-        box.operator("ncp.import_motion")
-        row = box.row(align=True)
-        row.prop(st, "frame_step")
-        row.prop(st, "build_world", text="World")
+
+class NCP_PT_anim(_NCPSubPanel):
+    bl_label = "6 · Animation (neurosim)"
+    bl_idname = "NCP_PT_anim"
+
+    def draw_header(self, context):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        ok = bool(arm is not None and arm.animation_data
+                  and arm.animation_data.action)
+        self.layout.label(icon="CHECKMARK" if ok else "PLAY")
+
+    def draw(self, context):
+        st = context.scene.ncp
+        lay = self.layout
+        lay.prop(st, "frame_step")
+        lay.prop(st, "build_world")
+        _big(lay, "ncp.import_motion", "Import Neuro Motion", icon="PLAY")
+        _hint(lay, "Motion JSON экспортируется из neurosim (кнопка Export)")
+
+
+class NCP_PT_settings(_NCPSubPanel):
+    bl_label = "Files & Settings"
+    bl_idname = "NCP_PT_settings"
+
+    def draw_header(self, context):
+        self.layout.label(icon="PREFERENCES")
+
+    def draw(self, context):
+        st = context.scene.ncp
+        lay = self.layout
+        lay.prop(st, "out_dir")
+        lay.prop(st, "comfy_timeout")
+        lay.operator("ncp.open_out", icon="FILE_FOLDER")
+        _hint(lay, "Подробности и схематика — INSTALL_RU.txt рядом с аддоном")
 
 
 # ----------------------------------------------------------- регистрация
@@ -859,7 +1104,16 @@ classes = (
     NCP_OT_bake_muscles,
     NCP_OT_import_motion,
     NCP_OT_run_all,
+    NCP_OT_cancel,
+    NCP_OT_open_out,
     NCP_PT_pipeline,
+    NCP_PT_sketch,
+    NCP_PT_image,
+    NCP_PT_mesh,
+    NCP_PT_rig,
+    NCP_PT_muscles,
+    NCP_PT_anim,
+    NCP_PT_settings,
 )
 
 
