@@ -1,0 +1,20 @@
+schema_version = "1.0.0"
+
+id = "neuro_character_pipeline"
+version = "1.0.0"
+name = "Neuro Character Pipeline"
+tagline = "Image to 3D mesh, neuro skeleton, X-Muscle, motion"
+maintainer = "blender_neuro"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+tags = ["3D View", "Rigging"]
+
+[permissions]
+network = "Talk to local ComfyUI (http://127.0.0.1:8188)"
+files = "Save generated images and sketches"

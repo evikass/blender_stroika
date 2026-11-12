@@ -1,0 +1,885 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "id": "TRELLIS",
+      "name": "TRELLIS",
+      "comps": [
+        "trellis2",
+        "trellis_ssdec",
+        "dinov3",
+        "birefnet"
+      ],
+      "size": 18042207837
+    },
+    {
+      "id": "PIXAL3D",
+      "name": "Pixal3D",
+      "comps": [
+        "pixal3d",
+        "moge",
+        "dinov3",
+        "birefnet"
+      ],
+      "size": 27007036804
+    },
+    {
+      "id": "HUNYUAN",
+      "name": "Hunyuan",
+      "comps": [
+        "hunyuan21",
+        "dinov2g",
+        "birefnet",
+        "realesrgan"
+      ],
+      "size": 19967280968
+    },
+    {
+      "id": "HUNYUAN_MV",
+      "name": "Hunyuan More Views",
+      "comps": [
+        "hunyuan2mv"
+      ],
+      "needs": "HUNYUAN",
+      "size": 4928153170
+    },
+    {
+      "id": "HI3D",
+      "name": "Enhance Detail",
+      "comps": [
+        "hi3d",
+        "dinov2l",
+        "clipl",
+        "u2net"
+      ],
+      "needs": "HUNYUAN",
+      "size": 10832153146
+    },
+    {
+      "id": "KLEIN",
+      "name": "Enhance Texture",
+      "comps": [
+        "klein",
+        "marigold"
+      ],
+      "size": 18561898031
+    }
+  ],
+  "components": {
+    "trellis2": {
+      "source": "hf",
+      "repo": "microsoft/TRELLIS.2-4B",
+      "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+      "dest": "models/microsoft/TRELLIS.2-4B",
+      "page": "https://huggingface.co/microsoft/TRELLIS.2-4B/tree/af44b45f2e35a493886929c6d786e563ec68364d",
+      "files": [
+        {
+          "path": "README.md",
+          "size": 6417,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/shape_dec_next_dc_f16c32_fp16.json",
+          "size": 678,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+          "size": 948490494,
+          "sha256": "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581"
+        },
+        {
+          "path": "ckpts/shape_enc_next_dc_f16c32_fp16.json",
+          "size": 653,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/shape_enc_next_dc_f16c32_fp16.safetensors",
+          "size": 708797208,
+          "sha256": "f37c5ff5b983b68e9946060000f09bc131f3e84318a2c8b7430a81e4b4636c41"
+        },
+        {
+          "path": "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.json",
+          "size": 458,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
+          "size": 2584574424,
+          "sha256": "07cd0596f634c5adc1890023d16023afc5eed02fb84b22bb23aff5bf0030fbbd"
+        },
+        {
+          "path": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.json",
+          "size": 458,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+          "size": 2584574424,
+          "sha256": "ec5e0917ef9b7e25ad51dffc7d19687a42019871f94239f2fa7f86264c55b70f"
+        },
+        {
+          "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.json",
+          "size": 458,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
+          "size": 2584672728,
+          "sha256": "580401269059a339b8318ab9ced459a13ba63391721c83a6c383198c29e77686"
+        },
+        {
+          "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.json",
+          "size": 458,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_512_bf16.safetensors",
+          "size": 2584672728,
+          "sha256": "8371aa1c5d13be79dcd5ddfd2cf3835e902e204dc34427169a1c702828e1a94d"
+        },
+        {
+          "path": "ckpts/ss_flow_img_dit_1_3B_64_bf16.json",
+          "size": 467,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+          "size": 2584426920,
+          "sha256": "ca01377c485bec418076d38ee80166d32dc776d744f2553b835cba1e97a7abf6"
+        },
+        {
+          "path": "ckpts/tex_dec_next_dc_f16c32_fp16.json",
+          "size": 705,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+          "size": 948458812,
+          "sha256": "97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c"
+        },
+        {
+          "path": "ckpts/tex_enc_next_dc_f16c32_fp16.json",
+          "size": 676,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/tex_enc_next_dc_f16c32_fp16.safetensors",
+          "size": 708797208,
+          "sha256": "dd109f75f84b90fa411554ed6b0e4a87f430841163156fc0ebda2ebdc4752493"
+        },
+        {
+          "path": "pipeline.json",
+          "size": 4186,
+          "sha256": null
+        },
+        {
+          "path": "texturing_pipeline.json",
+          "size": 2965,
+          "sha256": null
+        }
+      ]
+    },
+    "trellis_ssdec": {
+      "source": "hf",
+      "repo": "microsoft/TRELLIS-image-large",
+      "revision": "25e0d31ffbebe4b5a97464dd851910efc3002d96",
+      "dest": "models/microsoft/TRELLIS-image-large",
+      "page": "https://huggingface.co/microsoft/TRELLIS-image-large/tree/25e0d31ffbebe4b5a97464dd851910efc3002d96",
+      "files": [
+        {
+          "path": "ckpts/ss_dec_conv3d_16l8_fp16.json",
+          "size": 245,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+          "size": 147591972,
+          "sha256": "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a"
+        }
+      ]
+    },
+    "dinov3": {
+      "source": "hf",
+      "repo": "visualbruno/dinov3-vitl16-pretrain-lvd1689m",
+      "revision": "8463e34549282813c2cbf67241b27c6fe8fa6321",
+      "dest": "models/facebook/dinov3-vitl16-pretrain-lvd1689m",
+      "page": "https://huggingface.co/visualbruno/dinov3-vitl16-pretrain-lvd1689m/tree/8463e34549282813c2cbf67241b27c6fe8fa6321",
+      "files": [
+        {
+          "path": "config.json",
+          "size": 745,
+          "sha256": null
+        },
+        {
+          "path": "model.safetensors",
+          "size": 1212559808,
+          "sha256": "dcb2e45127cccbf1601e5f42fef165eea275c8e5213197e8dcf3f48822718179"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size": 585,
+          "sha256": null
+        }
+      ]
+    },
+    "birefnet": {
+      "source": "hf",
+      "repo": "ZhengPeng7/BiRefNet",
+      "revision": "e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4",
+      "dest": "models/ZhengPeng7/BiRefNet",
+      "page": "https://huggingface.co/ZhengPeng7/BiRefNet/tree/e2bf8e4460fc8fa32bba5ea4d94b3233d367b0e4",
+      "files": [
+        {
+          "path": "BiRefNet_config.py",
+          "size": 298,
+          "sha256": null
+        },
+        {
+          "path": "birefnet.py",
+          "size": 91896,
+          "sha256": null
+        },
+        {
+          "path": "config.json",
+          "size": 405,
+          "sha256": null
+        },
+        {
+          "path": "handler.py",
+          "size": 4762,
+          "sha256": null
+        },
+        {
+          "path": "model.safetensors",
+          "size": 444473596,
+          "sha256": "9ab37426bf4de0567af6b5d21b16151357149139362e6e8992021b8ce356a154"
+        }
+      ]
+    },
+    "pixal3d": {
+      "source": "hf",
+      "repo": "TencentARC/Pixal3D",
+      "revision": "b0cb2e1b794cab9aa0ac38a95d794a4d9337437f",
+      "dest": "models/TencentARC/Pixal3D",
+      "page": "https://huggingface.co/TencentARC/Pixal3D/tree/b0cb2e1b794cab9aa0ac38a95d794a4d9337437f",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 1064,
+          "sha256": null
+        },
+        {
+          "path": "NOTICE",
+          "size": 12527,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/shape_dec_next_dc_f16c32_fp16.json",
+          "size": 678,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+          "size": 948490494,
+          "sha256": "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581"
+        },
+        {
+          "path": "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.json",
+          "size": 535,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
+          "size": 5546764048,
+          "sha256": "3e6d1df0e62bc5bc863320d1d63d6b996235eef4abb8b851e878c88f316369f1"
+        },
+        {
+          "path": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.json",
+          "size": 535,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+          "size": 5546764048,
+          "sha256": "63569838c1da93f010e2fa805b202ecf802cc758830230abac202a81b70e5b45"
+        },
+        {
+          "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.json",
+          "size": 535,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
+          "size": 5546960656,
+          "sha256": "65df179ad02f9e92bc18335d7861fadd95f268e6249217352468dd83cb79d1d0"
+        },
+        {
+          "path": "ckpts/ss_dec_conv3d_16l8_fp16.json",
+          "size": 245,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+          "size": 147591972,
+          "sha256": "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a"
+        },
+        {
+          "path": "ckpts/ss_flow_img_dit_1_3B_64_bf16.json",
+          "size": 503,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+          "size": 5359822584,
+          "sha256": "6d0147bb347eb61fa81c304cc68c7fd69d447e91870357a549b47e1d0fd77242"
+        },
+        {
+          "path": "ckpts/tex_dec_next_dc_f16c32_fp16.json",
+          "size": 705,
+          "sha256": null
+        },
+        {
+          "path": "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+          "size": 948458812,
+          "sha256": "97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c"
+        },
+        {
+          "path": "pipeline.json",
+          "size": 4068,
+          "sha256": null
+        }
+      ],
+      "post": [
+        "naf"
+      ]
+    },
+    "moge": {
+      "source": "hf",
+      "repo": "Ruicheng/moge-2-vitl",
+      "revision": "39c4d5e957afe587e04eec59dc2bcc3be5ecd968",
+      "dest": "models/Ruicheng/moge-2-vitl",
+      "page": "https://huggingface.co/Ruicheng/moge-2-vitl/tree/39c4d5e957afe587e04eec59dc2bcc3be5ecd968",
+      "files": [
+        {
+          "path": "model.pt",
+          "size": 1305030700,
+          "sha256": "3eefd4abb2102f38f12b2d1992e5ff15e4923e5431c67dd494afe157e0111cd5"
+        }
+      ]
+    },
+    "hunyuan21": {
+      "source": "hf",
+      "repo": "tencent/Hunyuan3D-2.1",
+      "revision": "0b94677654c57bb9a6b6845cd7b704ccf551d327",
+      "dest": "models/tencent/Hunyuan3D-2.1",
+      "page": "https://huggingface.co/tencent/Hunyuan3D-2.1/tree/0b94677654c57bb9a6b6845cd7b704ccf551d327",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 17915,
+          "sha256": null
+        },
+        {
+          "path": "Notice.txt",
+          "size": 16644,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-dit-v2-1/config.yaml",
+          "size": 2078,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-dit-v2-1/model.fp16.ckpt",
+          "size": 7366389768,
+          "sha256": "6b519fc7242f78e9b5f47ea4d55668fe3d944a2d27332f4ca68d29a6ff603f5e"
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/README.md",
+          "size": 1801,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/feature_extractor/preprocessor_config.json",
+          "size": 342,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/image_encoder/config.json",
+          "size": 554,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/image_encoder/model.safetensors",
+          "size": 1264217240,
+          "sha256": "ae616c24393dd1854372b0639e5541666f7521cbe219669255e865cb7f89466a"
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/model_index.json",
+          "size": 617,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/scheduler/scheduler_config.json",
+          "size": 387,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/text_encoder/config.json",
+          "size": 613,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/text_encoder/pytorch_model.bin",
+          "size": 1361671895,
+          "sha256": "c3e254d7b61353497ea0be2c4013df4ea8f739ee88cffa0ba58cd085459ed565",
+          "convert_to": "hunyuan3d-paintpbr-v2-1/text_encoder/model.safetensors"
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/tokenizer/merges.txt",
+          "size": 524619,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/tokenizer/special_tokens_map.json",
+          "size": 460,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/tokenizer/tokenizer_config.json",
+          "size": 807,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/tokenizer/vocab.json",
+          "size": 1059962,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/unet/attn_processor.py",
+          "size": 35104,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/unet/config.json",
+          "size": 911,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.bin",
+          "size": 3925293863,
+          "sha256": "675a1b5cd0098b2002637c443946529c03c5cd54427f40245263350feb3dd5b8",
+          "convert_to": "hunyuan3d-paintpbr-v2-1/unet/diffusion_pytorch_model.safetensors"
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/unet/model.py",
+          "size": 25514,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/unet/modules.py",
+          "size": 45181,
+          "sha256": null,
+          "patched": true
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/vae/config.json",
+          "size": 553,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.bin",
+          "size": 334707217,
+          "sha256": "1b4889b6b1d4ce7ae320a02dedaeff1780ad77d415ea0d744b476155c6377ddc",
+          "convert_to": "hunyuan3d-paintpbr-v2-1/vae/diffusion_pytorch_model.safetensors"
+        },
+        {
+          "path": "hunyuan3d-vae-v2-1/config.yaml",
+          "size": 409,
+          "sha256": null
+        },
+        {
+          "path": "hunyuan3d-vae-v2-1/model.fp16.ckpt",
+          "size": 655648152,
+          "sha256": "5cbe97f25e6e7abd4bccc80ab07524ec0c86d24118486a9ba49bb5dfb070288a"
+        }
+      ],
+      "patches": [
+        [
+          "paint_modules",
+          "hunyuan3d-paintpbr-v2-1/unet/modules.py"
+        ]
+      ],
+      "post": [
+        "convert_bins"
+      ]
+    },
+    "dinov2g": {
+      "source": "hf",
+      "repo": "facebook/dinov2-giant",
+      "revision": "611a9d42f2335e0f921f1e313ad3c1b7178d206d",
+      "dest": "models/facebook/dinov2-giant",
+      "page": "https://huggingface.co/facebook/dinov2-giant/tree/611a9d42f2335e0f921f1e313ad3c1b7178d206d",
+      "files": [
+        {
+          "path": "config.json",
+          "size": 548,
+          "sha256": null
+        },
+        {
+          "path": "model.safetensors",
+          "size": 4546005432,
+          "sha256": "917d3c470db999d32a312f8542149be91c7cbac61ee8fb4b67ae3d82b79ce21f"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "size": 436,
+          "sha256": null
+        }
+      ]
+    },
+    "hunyuan2mv": {
+      "source": "hf",
+      "repo": "tencent/Hunyuan3D-2mv",
+      "revision": "3a761b539b29fe4ff64714813aa9560fd66f5de0",
+      "dest": "models/tencent/Hunyuan3D-2mv",
+      "page": "https://huggingface.co/tencent/Hunyuan3D-2mv/tree/3a761b539b29fe4ff64714813aa9560fd66f5de0",
+      "files": [
+        {
+          "path": "hunyuan3d-dit-v2-mv/config.yaml",
+          "size": 1608,
+          "sha256": null,
+          "patched": true
+        },
+        {
+          "path": "hunyuan3d-dit-v2-mv/model.fp16.safetensors",
+          "size": 4928151562,
+          "sha256": "d36f5881bcdc56726b73e517cd444c13c60732431622da7268145355c8d38e9c"
+        }
+      ],
+      "patches": [
+        [
+          "mv_config",
+          "hunyuan3d-dit-v2-mv/config.yaml"
+        ]
+      ]
+    },
+    "hi3d": {
+      "source": "hf",
+      "repo": "hi3d-official/Hi3Dv1.0",
+      "revision": "d502e938cbedc6e87aba8884614c5ca6d177a4b6",
+      "dest": "models/hi3d-official/Hi3Dv1.0",
+      "page": "https://huggingface.co/hi3d-official/Hi3Dv1.0/tree/d502e938cbedc6e87aba8884614c5ca6d177a4b6",
+      "files": [
+        {
+          "path": "AUTHORS",
+          "size": 713,
+          "sha256": null
+        },
+        {
+          "path": "LICENSE",
+          "size": 27470,
+          "sha256": null
+        },
+        {
+          "path": "NOTICE",
+          "size": 2157,
+          "sha256": null
+        },
+        {
+          "path": "README.md",
+          "size": 15620,
+          "sha256": null
+        },
+        {
+          "path": "README.zh-CN.md",
+          "size": 13881,
+          "sha256": null
+        },
+        {
+          "path": "THIRD_PARTY_LICENSES.md",
+          "size": 24344,
+          "sha256": null
+        },
+        {
+          "path": "model_index.json",
+          "size": 224,
+          "sha256": null
+        },
+        {
+          "path": "scheduler/scheduler_config.json",
+          "size": 127,
+          "sha256": null
+        },
+        {
+          "path": "sparc3d/ops/flexicubes/LICENSE.txt",
+          "size": 11357,
+          "sha256": null
+        },
+        {
+          "path": "transformer_1024/config.json",
+          "size": 1337,
+          "sha256": null
+        },
+        {
+          "path": "transformer_1024/model.safetensors",
+          "size": 3675679280,
+          "sha256": "a2ca5e44dde51cacecd59b42fceeb5f14e75d55e6dd047337752c4e6f281008c"
+        },
+        {
+          "path": "transformer_512/config.json",
+          "size": 1336,
+          "sha256": null
+        },
+        {
+          "path": "transformer_512/model.safetensors",
+          "size": 3675679280,
+          "sha256": "8ba88311dccf23463c6e10dd0d3bd5e0c5c35d1608c6f466413b6428b5ad8e56"
+        },
+        {
+          "path": "vae/config.json",
+          "size": 131,
+          "sha256": null
+        },
+        {
+          "path": "vae/model.safetensors",
+          "size": 376629712,
+          "sha256": "605d207c77f8db0b33c567a5861252f0090cf3c3604dfda1cfee09e8f0b53f3e"
+        }
+      ]
+    },
+    "dinov2l": {
+      "source": "hf",
+      "repo": "facebook/dinov2-large",
+      "revision": "47b73eefe95e8d44ec3623f8890bd894b6ea2d6c",
+      "dest": "hfcache",
+      "page": "https://huggingface.co/facebook/dinov2-large/tree/47b73eefe95e8d44ec3623f8890bd894b6ea2d6c",
+      "files": [
+        {
+          "path": "config.json",
+          "size": 549,
+          "sha256": null
+        },
+        {
+          "path": "model.safetensors",
+          "size": 1217522888,
+          "sha256": "399fba97a95f22c36834418bc69373364a99af3a1153da1c0fb31db567c92e23"
+        }
+      ]
+    },
+    "clipl": {
+      "source": "hf",
+      "repo": "openai/clip-vit-large-patch14",
+      "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41",
+      "dest": "hfcache",
+      "page": "https://huggingface.co/openai/clip-vit-large-patch14/tree/32bd64288804d66eefd0ccbe215aa642df71cc41",
+      "files": [
+        {
+          "path": "config.json",
+          "size": 4519,
+          "sha256": null
+        },
+        {
+          "path": "model.safetensors",
+          "size": 1710540580,
+          "sha256": "a2bf730a0c7debf160f7a6b50b3aaf3703e7e88ac73de7a314903141db026dcb"
+        }
+      ]
+    },
+    "klein": {
+      "source": "hf",
+      "repo": "black-forest-labs/FLUX.2-klein-4B",
+      "revision": "e7b7dc27f91deacad38e78976d1f2b499d76a294",
+      "dest": "models/black-forest-labs/FLUX.2-klein-4B",
+      "page": "https://huggingface.co/black-forest-labs/FLUX.2-klein-4B/tree/e7b7dc27f91deacad38e78976d1f2b499d76a294",
+      "files": [
+        {
+          "path": "model_index.json",
+          "size": 446,
+          "sha256": null
+        },
+        {
+          "path": "scheduler/scheduler_config.json",
+          "size": 486,
+          "sha256": null
+        },
+        {
+          "path": "text_encoder/config.json",
+          "size": 1536,
+          "sha256": null
+        },
+        {
+          "path": "text_encoder/generation_config.json",
+          "size": 214,
+          "sha256": null
+        },
+        {
+          "path": "text_encoder/model-00001-of-00002.safetensors",
+          "size": 4967215360,
+          "sha256": "8c0506e7f4936fa7e26183a4fd8da4e2bdbc5990ba64ae441f965d51228f36ea"
+        },
+        {
+          "path": "text_encoder/model-00002-of-00002.safetensors",
+          "size": 3077766632,
+          "sha256": "82f2bd839378541b0557bfabaf37c7d3d637071fdcb73302dedd7cf61162ce07"
+        },
+        {
+          "path": "text_encoder/model.safetensors.index.json",
+          "size": 32855,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/added_tokens.json",
+          "size": 707,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/chat_template.jinja",
+          "size": 4168,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/merges.txt",
+          "size": 1671853,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/special_tokens_map.json",
+          "size": 613,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/tokenizer.json",
+          "size": 11422654,
+          "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+        },
+        {
+          "path": "tokenizer/tokenizer_config.json",
+          "size": 5404,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/vocab.json",
+          "size": 2776833,
+          "sha256": null
+        },
+        {
+          "path": "transformer/config.json",
+          "size": 541,
+          "sha256": null
+        },
+        {
+          "path": "transformer/diffusion_pytorch_model.safetensors",
+          "size": 7751109744,
+          "sha256": "9f29f9edcfdae452a653ffb51a534ca4decd389952c225724ff3b94042612a6e"
+        },
+        {
+          "path": "vae/config.json",
+          "size": 821,
+          "sha256": null
+        },
+        {
+          "path": "vae/diffusion_pytorch_model.safetensors",
+          "size": 168120878,
+          "sha256": "ca70d2202afe6415bdbcb8793ba8cd99fd159cfe6192381504d6c4d3036e0f04"
+        }
+      ]
+    },
+    "realesrgan": {
+      "source": "url",
+      "dest": "models/realesrgan",
+      "page": "https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.1.0",
+      "files": [
+        {
+          "path": "RealESRGAN_x4plus.pth",
+          "size": 67040989,
+          "sha256": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
+          "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+        }
+      ]
+    },
+    "marigold": {
+      "source": "hf",
+      "repo": "prs-eth/marigold-iid-lighting-v1-1",
+      "revision": "08c3930bb641abf786ba44ce92547507ebefbc16",
+      "dest": "models/prs-eth/marigold-iid-lighting-v1-1",
+      "page": "https://huggingface.co/prs-eth/marigold-iid-lighting-v1-1/tree/08c3930bb641abf786ba44ce92547507ebefbc16",
+      "files": [
+        {
+          "path": "model_index.json",
+          "size": 857,
+          "sha256": null
+        },
+        {
+          "path": "scheduler/scheduler_config.json",
+          "size": 533,
+          "sha256": null
+        },
+        {
+          "path": "text_encoder/config.json",
+          "size": 633,
+          "sha256": null
+        },
+        {
+          "path": "text_encoder/model.fp16.safetensors",
+          "size": 680820392,
+          "sha256": "bc1827c465450322616f06dea41596eac7d493f4e95904dcb51f0fc745c4e13f"
+        },
+        {
+          "path": "tokenizer/merges.txt",
+          "size": 524619,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/special_tokens_map.json",
+          "size": 460,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/tokenizer_config.json",
+          "size": 855,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962,
+          "sha256": null
+        },
+        {
+          "path": "unet/config.json",
+          "size": 1954,
+          "sha256": null
+        },
+        {
+          "path": "unet/diffusion_pytorch_model.fp16.safetensors",
+          "size": 1732019968,
+          "sha256": "8c2e8da73793181f87c9c7a752a939d6f6834104e9854bf1c53c6b37de3594d9"
+        },
+        {
+          "path": "vae/config.json",
+          "size": 711,
+          "sha256": null
+        },
+        {
+          "path": "vae/diffusion_pytorch_model.fp16.safetensors",
+          "size": 167335342,
+          "sha256": "3e4c08995484ee61270175e9e7a072b66a6e4eeb5f0c266667fe1f45b90daf9a"
+        }
+      ]
+    },
+    "u2net": {
+      "source": "url",
+      "dest": "models/u2net",
+      "page": "https://github.com/danielgatis/rembg/releases/tag/v0.0.0",
+      "files": [
+        {
+          "path": "u2net.onnx",
+          "size": 175997641,
+          "sha256": "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
+          "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
+        }
+      ]
+    }
+  }
+}

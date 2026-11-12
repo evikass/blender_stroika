@@ -1,0 +1,32 @@
+schema_version = "1.0.0"
+
+id = "image_to_3d"
+version = "1.1.8"
+name = "Image to 3D"
+tagline = "Textured 3D model from one picture, on your own GPU"
+maintainer = "Milad Kambari - 3DRedbox Studio <contact@3dredboxstudio.com>"
+type = "add-on"
+website = "https://superhivemarket.com/products/imageto3d"
+
+tags = ["3D View", "Mesh"]
+
+blender_version_min = "4.2.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+platforms = ["windows-x64"]
+
+[permissions]
+network = "Download the AI models and the engine"
+files = "Read pictures, install the engine and models"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "_dist/",
+  "_view/",
+  "*.bak_*",
+  "*.pyc",
+]
