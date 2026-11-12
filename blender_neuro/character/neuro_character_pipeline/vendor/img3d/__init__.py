@@ -1,9 +1,9 @@
 bl_info = {
-    "name": "Image to 3D",
+    "name": "Image to 3D 2",
     "author": "Milad Kambari - 3DRedbox Studio",
-    "version": (1, 1, 8),
+    "version": (2, 0, 8),
     "blender": (4, 2, 0),
-    "location": "View3D > Sidebar (N) > Image to 3D",
+    "location": "View3D > Sidebar (N) > Image to 3D 2",
     "description": "Turn one picture into a textured 3D model with TRELLIS.2, "
                    "running on your own GPU",
     "category": "3D View",
@@ -27,6 +27,8 @@ from . import models as dl
 importlib.reload(dl)
 from . import updates
 importlib.reload(updates)
+from . import canvas
+importlib.reload(canvas)
 
 VERSION = "v%d.%d.%d" % bl_info["version"]
 ARTSTATION_URL = "https://www.artstation.com/milad_kambari/store"
@@ -78,7 +80,7 @@ def engine_dir():
 
 def engine_python(engine="TRELLIS"):
     env = {"HUNYUAN": "env_hy", "HI3D": "env_hi3d",
-           "KLEIN": "env_klein"}.get(engine, "env")
+           "KLEIN": "env_klein", "CANVAS": "env_qwen"}.get(engine, "env")
     return os.path.join(engine_dir(), env, "Scripts", "python.exe")
 
 
@@ -151,6 +153,14 @@ def software_ready(engine="TRELLIS"):
         return (software_ready("HUNYUAN") and
                 os.path.isfile(engine_python("KLEIN")) and
                 os.path.isfile(os.path.join(d, "INSTALLED_KLEIN")))
+    if engine == "CANVAS":
+        # the Canvas picture models (Qwen) in their own environment, and
+        # Klein, which draws the parts
+        return (os.path.isfile(engine_python("CANVAS")) and
+                os.path.isfile(os.path.join(d, "engine_qwen", "render.py")) and
+                os.path.isfile(os.path.join(d, "INSTALLED_CANVAS")) and
+                os.path.isfile(engine_python("KLEIN")) and
+                os.path.isfile(os.path.join(d, "INSTALLED_KLEIN")))
     if engine == "PIXAL3D":
         return software_ready("TRELLIS")
     if engine == "HUNYUAN":
@@ -181,6 +191,13 @@ def klein_ready():
     """Enhance Texture is installed and its models are downloaded."""
     d = engine_dir()
     return bool(d) and software_ready("KLEIN") and dl.ready(d, "KLEIN")
+
+
+def canvas_ready():
+    """The Canvas tools are installed and their models downloaded."""
+    d = engine_dir()
+    return bool(d) and software_ready("CANVAS") and not \
+        dl.needed_for("CANVAS", d)
 
 
 def extras_missing():
@@ -302,6 +319,11 @@ class IMG3D_Preferences(bpy.types.AddonPreferences):
     welcomed: BoolProperty(name="Welcome Shown", default=False,
                            description="The hello has been said once already",
                            update=lambda s, c: _save_config())
+    gentle_download: BoolProperty(
+        name="Gentle Download", default=False,
+        description="For older computers: download one file at a time and "
+                    "a bit slower, so the computer stays smooth",
+        update=lambda s, c: _save_config())
     auto_update: BoolProperty(
         name="Auto Update", default=False,
         description="When Blender starts, install a newer version of "
@@ -314,6 +336,7 @@ class IMG3D_Preferences(bpy.types.AddonPreferences):
         row.operator("img3d.welcome", icon="INFO")
         row.operator("img3d.save_report", icon="FILE_TEXT")
         col.prop(self, "engine_dir")
+        col.prop(self, "gentle_download")
         col.label(text="Engine ready" if engine_ready()
                   else "Engine not installed", icon="CHECKMARK"
                   if engine_ready() else "ERROR")
@@ -427,7 +450,7 @@ def sync_engine_code():
         return
     import filecmp
     import shutil
-    for name in ("engine", "engine_hy", "engine_hi3d"):
+    for name in ("engine", "engine_hy", "engine_hi3d", "engine_qwen"):
         src = os.path.join(ADDON_DIR, name)
         dst = os.path.join(d, name)
         if name in _SYNCED or not (os.path.isdir(src) and os.path.isdir(dst)):
@@ -2138,13 +2161,22 @@ class IMG3D_OT_install_engine(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _PROC["p"] is None and bool(engine_dir())
+        return bool(engine_dir())
 
     def invoke(self, context, event):
         return self.execute(context)
 
     def execute(self, context):
         global SETUP_JOB
+        p_ = _PROC["p"]
+        if p_ is not None:
+            if p_.poll() is None:
+                context.scene.img3d.status = (
+                    "Wait for the job that is running to finish, then press "
+                    "Install again")
+                _redraw()
+                return {"FINISHED"}
+            _PROC["p"] = None        # an earlier job that already ended
         d = engine_dir()
         os.makedirs(d, exist_ok=True)
         server_stop()
@@ -2154,6 +2186,8 @@ class IMG3D_OT_install_engine(bpy.types.Operator):
                 d, ADDON_DIR]
         if self.target == "EXTRAS":
             args.append("--extras")
+        elif self.target == "CANVAS":
+            args.append("--canvas")
         elif self.target == "HUNYUAN" or (
                 not self.target and context.scene.img3d.engine == "HUNYUAN"):
             args.append("--hunyuan")
@@ -2497,7 +2531,7 @@ class IMG3D_OT_dl_get(bpy.types.Operator):
     bl_idname = "img3d.dl_get"
     bl_label = "Download"
     group: StringProperty()
-    verify: BoolProperty(default=False)
+    verify: BoolProperty(default=False, options={"SKIP_SAVE"})
 
     def execute(self, context):
         st = context.scene.img3d
@@ -2511,7 +2545,7 @@ class IMG3D_OT_dl_get(bpy.types.Operator):
             return {"FINISHED"}
         gids = [self.group]
         need = g.get("needs")
-        if need and not self.verify and not dl.ready(root, need):
+        if need and not self.verify and not dl.have(root, need):
             gids.insert(0, need)
         if not dl.start(root, gids, verify=self.verify, redraw=_redraw):
             st.status = "Another download is running - wait for it or stop it"
@@ -2557,8 +2591,10 @@ class IMG3D_OT_dl_page(bpy.types.Operator):
             row.label(text=name, icon="CHECKMARK" if ok else "BLANK1")
             op = row.operator("img3d.dl_open", text="Open Page", icon="URL")
             op.url = page
+            op.folder = ""
             op = row.operator("img3d.dl_open", text="Open Folder",
                               icon="FILE_FOLDER")
+            op.url = ""
             op.folder = folder
             box.label(text=folder)
             if len(files) <= 6:
@@ -2566,8 +2602,10 @@ class IMG3D_OT_dl_page(bpy.types.Operator):
                     os.path.basename(f) for f in files)[:110])
             else:
                 box.label(text="%d files" % len(files))
-        lay.operator("img3d.dl_get", text="Check Files",
-                     icon="CHECKMARK").group = self.group
+        op = lay.operator("img3d.dl_get", text="Check Files",
+                          icon="CHECKMARK")
+        op.group = self.group
+        op.verify = True
 
     def execute(self, context):
         return {"FINISHED"}
@@ -2577,8 +2615,8 @@ class IMG3D_OT_dl_open(bpy.types.Operator):
     """Open a model's official page, or the folder its files go into"""
     bl_idname = "img3d.dl_open"
     bl_label = "Open"
-    url: StringProperty()
-    folder: StringProperty()
+    url: StringProperty(options={"SKIP_SAVE"})
+    folder: StringProperty(options={"SKIP_SAVE"})
 
     def execute(self, context):
         if self.url:
@@ -2739,7 +2777,7 @@ def build_report():
     import platform
     L = []
     add = L.append
-    add("Image to 3D support report  %s" % VERSION)
+    add("Image to 3D 2 support report  %s" % VERSION)
     add("Made " + time.strftime("%Y-%m-%d %H:%M:%S"))
     add("")
     add("== System ==")
@@ -2812,6 +2850,18 @@ def build_report():
                     add("%s = %s" % (k, str(v)[:200]))
             except Exception:
                 pass
+    add("")
+    add("== Canvas logs ==")
+    try:
+        import glob as _g
+        cdir = os.path.join(engine_dir(), "canvas", "canvas")
+        for f_ in sorted(_g.glob(os.path.join(cdir, "*.log")),
+                         key=os.path.getmtime)[-6:]:
+            add("--- %s" % os.path.basename(f_))
+            L.extend(open(f_, encoding="utf-8", errors="replace")
+                     .read().splitlines()[-120:])
+    except Exception as exc:
+        add("(no Canvas logs: %s)" % exc)
     add("")
     add("== Last engine output ==")
     lp = log_path()
@@ -3054,7 +3104,8 @@ class IMG3D_OT_clear_cache(bpy.types.Operator):
 CONFIG = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"),
                       "3DRedbox", "image_to_3d.json")
 _PREF_KEYS = ("engine_dir", "classic_panel", "accent_hue", "accent_sat",
-              "corner", "ui_bright", "welcomed", "auto_update")
+              "corner", "ui_bright", "welcomed", "auto_update",
+              "gentle_download")
 
 
 def _save_config():
@@ -3242,6 +3293,18 @@ def register():
         bpy.app.timers.register(updates.auto_update_due, first_interval=8.0)
     bpy.types.Scene.img3d = bpy.props.PointerProperty(type=IMG3D_Settings)
     card.register()
+    try:
+        # the Canvas used to be a separate test add-on: it is built in now
+        import addon_utils
+        if "img3d_canvas" in bpy.context.preferences.addons:
+            addon_utils.disable("img3d_canvas", default_set=True)
+            print("[Image to 3D 2] turned off the old separate Canvas add-on")
+    except Exception as exc:
+        print("[Image to 3D 2] old canvas:", exc)
+    try:
+        canvas.register()
+    except Exception as exc:
+        print("[Image to 3D 2] canvas:", exc)
     bpy.utils.register_class(IMG3D_OT_clear_cache)
     bpy.utils.register_class(IMG3D_OT_welcome)
     if not VENDORED and not bpy.app.timers.is_registered(_welcome_due):
@@ -3266,6 +3329,10 @@ def unregister():
     except Exception:
         pass
     updates.unregister()
+    try:
+        canvas.unregister()
+    except Exception:
+        pass
     try:
         _fh_unpatch()
     except Exception:

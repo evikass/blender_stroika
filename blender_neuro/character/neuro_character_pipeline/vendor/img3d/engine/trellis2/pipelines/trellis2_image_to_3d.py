@@ -903,6 +903,12 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         output_np = np.array(output)
         alpha = output_np[:, :, 3]
         bbox = np.argwhere(alpha > 0.8 * 255)
+        if len(bbox) < 0.03 * alpha.size:
+            # nothing was cut out: keep the whole picture
+            output_np[:, :, 3] = 254
+            output = Image.fromarray(output_np)
+            alpha = output_np[:, :, 3]
+            bbox = np.argwhere(alpha > 0.8 * 255)
         bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
         center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
         size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])

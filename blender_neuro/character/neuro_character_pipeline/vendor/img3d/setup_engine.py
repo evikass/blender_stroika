@@ -7,6 +7,8 @@ Run by the add-on with Blender's own Python:
     --hunyuan    Hunyuan3D, then the Enhance tools (Enhance Texture, Enhance
                  Detail) that run next to it
     --extras     only the Enhance tools (for installs made before they existed)
+    --canvas     the Canvas picture tools (Qwen); their models are
+                 downloaded one by one in the Downloads section
 
 Prints PROGRESS lines the add-on turns into its bar. Safe to run again: every
 step that is already done is skipped, so an interrupted install picks up where
@@ -18,6 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -25,6 +28,7 @@ ROOT = os.path.abspath(sys.argv[1])
 ADDON = os.path.abspath(sys.argv[2])
 HUNYUAN = "--hunyuan" in sys.argv
 EXTRAS = "--extras" in sys.argv
+CANVAS = "--canvas" in sys.argv
 NOWINDOW = 0x08000000 if os.name == "nt" else 0
 
 UV_URL = ("https://github.com/astral-sh/uv/releases/download/0.9.5/"
@@ -76,6 +80,25 @@ def cert_bundle():
                         pems.append(ssl.DER_cert_to_PEM_cert(der))
             except Exception:
                 pass
+        # what this system trusts (Linux keeps it in a file), and any list
+        # the user set already
+        try:
+            vp = ssl.get_default_verify_paths()
+            for f_ in (vp.cafile, vp.openssl_cafile,
+                       os.environ.get("SSL_CERT_FILE"),
+                       os.environ.get("REQUESTS_CA_BUNDLE")):
+                if f_ and os.path.isfile(f_):
+                    pems.append(open(f_, encoding="utf-8",
+                                     errors="ignore").read())
+        except Exception:
+            pass
+        # plus the standard public list Blender ships: a PC whose Windows
+        # has not fetched a root yet still checks GitHub fine
+        try:
+            import certifi
+            pems.append(open(certifi.where(), encoding="utf-8").read())
+        except Exception:
+            pass
         if pems:
             path = os.path.join(ROOT, "certs.pem")
             with open(path, "w") as f:
@@ -119,18 +142,38 @@ def env():
     return e
 
 
-def run(cmd):
+def _run(cmd, e):
     log(" ".join(os.path.basename(c) if i == 0 else c
                  for i, c in enumerate(cmd))[:120])
-    p = subprocess.Popen(cmd, env=env(), stdout=subprocess.PIPE,
+    p = subprocess.Popen(cmd, env=e, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, creationflags=NOWINDOW)
+    cert = False
     for raw in iter(p.stdout.readline, b""):
         line = raw.decode("utf-8", "replace").strip()
+        if "certificate" in line.lower() or "UnknownIssuer" in line:
+            cert = True
         if line.startswith("PROGRESS "):
             print(line, flush=True)
         elif line:
             log(line[:100])
-    if p.wait() != 0:
+    return p.wait(), cert
+
+
+def run(cmd):
+    rc, cert = _run(cmd, env())
+    if rc != 0 and cert and len(cmd) > 4 and cmd[1:3] == ["pip", "install"] \
+            and cmd[3] == "--python":
+        # uv does not accept a certificate on this network: pip asks the
+        # system itself to check it (like a web browser does)
+        py, rest = cmd[4], cmd[5:]
+        log("installing with pip instead")
+        e = env()
+        e.pop("SSL_CERT_FILE", None)
+        if _run([py, "-m", "pip", "--version"], e)[0] != 0:
+            _run([py, "-m", "ensurepip", "--upgrade"], e)
+        rc, _c = _run([py, "-m", "pip", "install",
+                       "--disable-pip-version-check", *rest], e)
+    if rc != 0:
         raise SystemExit("ERROR install step failed: %s" %
                          os.path.basename(cmd[0]))
 
@@ -161,10 +204,50 @@ def has_nvidia():
         return False
 
 
+GH_PBS = "https://github.com/astral-sh/python-build-standalone/releases/download"
+
+
+def python_by_hand(uv, version):
+    """uv could not fetch Python itself (a certificate it doesn't accept):
+    fetch the same file with Blender's Python and let uv install it from that
+    copy. uv still checks the file against its own checksum."""
+    out = subprocess.run([uv, "python", "list", version, "--show-urls",
+                          "--only-downloads"], env=env(),
+                         capture_output=True, text=True,
+                         creationflags=NOWINDOW).stdout
+    url = ""
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].startswith(GH_PBS) and \
+                ("windows-x86_64-none" if os.name == "nt"
+                 else "linux-x86_64-gnu") in parts[0]:
+            url = parts[1]
+            break
+    if not url:
+        raise SystemExit("ERROR install step failed: uv.exe (no Python "
+                         "download found)")
+    mirror = os.path.join(ROOT, "python_files")
+    dst = os.path.join(mirror, *urllib.parse.unquote(
+        url[len(GH_PBS) + 1:]).split("/"))
+    if not os.path.isfile(dst):
+        log("getting Python with Blender's own connection")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        data = urllib.request.urlopen(urllib.request.Request(
+            url, headers={"User-Agent": "img3d"}), timeout=600).read()
+        with open(dst + ".part", "wb") as f:
+            f.write(data)
+        os.replace(dst + ".part", dst)
+    run([uv, "python", "install", version, "--mirror",
+         "file:///" + mirror.replace("\\", "/")])
+
+
 def venv(uv, name, version):
     py = os.path.join(ROOT, name, "Scripts", "python.exe")
     if not os.path.exists(py):
-        run([uv, "python", "install", version])
+        try:
+            run([uv, "python", "install", version])
+        except SystemExit:
+            python_by_hand(uv, version)
         run([uv, "venv", os.path.join(ROOT, name), "--python", version])
     return py
 
@@ -213,6 +296,34 @@ def install_hi3d(uv, f0, f1):
     pip("--no-deps", "--reinstall-package", "sparc3d", pkg)
     copy_engine("engine_hi3d")
     open(os.path.join(ROOT, "INSTALLED_HI3D"), "w").write(HI3D_BUILD)
+
+
+QWEN_TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
+NUNCHAKU = ("https://github.com/nunchaku-tech/nunchaku/releases/download/"
+            "v1.2.1/nunchaku-1.2.1%2Bcu12.8torch2.10-cp313-cp313-"
+            "win_amd64.whl")
+
+
+def install_canvas(uv):
+    """The Canvas picture models (Qwen-Image-Edit and Qwen-Image, Nunchaku
+    4-bit) in their own environment; Klein draws the parts."""
+    if not os.path.isfile(os.path.join(ROOT, "INSTALLED_KLEIN")):
+        install_klein(uv, 0.03, 0.25)
+    say(0.25, "Installing Canvas tools")
+    py = venv(uv, "env_qwen", "3.13")
+
+    def pip(*args):
+        run([uv, "pip", "install", "--python", py, *args])
+
+    pip("torch==2.10.0", "torchvision==0.25.0", "--index-url",
+        QWEN_TORCH_INDEX)
+    say(0.35, "Installing Canvas tools")
+    pip("--no-deps", "-r", lock("qwen"))
+    pip("--no-deps", NUNCHAKU)
+    copy_engine("engine_qwen")
+    open(os.path.join(ROOT, "INSTALLED_CANVAS"), "w").write("1")
+    say(1.0, "Installed")
+    print("DONE " + ROOT, flush=True)
 
 
 def install_extras(uv, f0, f1):
@@ -298,6 +409,9 @@ def main():
         return
     if HUNYUAN:
         install_hunyuan(uv)
+        return
+    if CANVAS:
+        install_canvas(uv)
         return
 
     py = os.path.join(ROOT, "env", "Scripts", "python.exe")

@@ -1269,6 +1269,47 @@ def release_cut_out():
             pass
 
 
+def matte_retry(m, t, pred):
+    """BiRefNet's mask in half precision is empty or broken on some cards
+    (GTX 16 series): cut the picture again in full precision."""
+    import numpy as np
+    import torch
+    if np.isfinite(pred).all() and (pred > 0.8).mean() >= 0.03:
+        return pred
+    print("cut-out again in full precision", flush=True)
+    try:
+        m.float()
+        with torch.no_grad():
+            p2 = m(t.float())[-1].sigmoid().float().cpu()[0, 0].numpy()
+        m.half()
+        p2 = np.nan_to_num(p2)
+        p1 = np.nan_to_num(pred)
+        if (p2 > 0.8).mean() > (p1 > 0.8).mean():
+            return p2
+        return p1
+    except Exception as exc:
+        print("full precision cut-out failed: %s" % exc, flush=True)
+        try:
+            m.half()
+        except Exception:
+            pass
+        return np.nan_to_num(pred)
+
+
+def whole_if_empty(alpha):
+    """The cut-out mask, or - when it found no object (a door or a wall
+    photo that fills the frame) - one that keeps the whole picture. 254, not
+    255, so the next steps take it as already cut out and do not try again."""
+    import numpy as np
+    from PIL import Image
+    a = np.asarray(alpha)
+    if (a > 0.8 * 255).mean() < 0.03:
+        print("no separate object found in the picture: using all of it",
+              flush=True)
+        return Image.new("L", alpha.size, 254)
+    return alpha
+
+
 def cut_out(img):
     import numpy as np
     if img.mode == "RGBA":
@@ -1288,11 +1329,12 @@ def cut_out(img):
             t = torch.from_numpy(x).permute(2, 0, 1)[None].half().cuda()
             with torch.no_grad():
                 pred = m(t)[-1].sigmoid().float().cpu()[0, 0].numpy()
+            pred = matte_retry(m, t, pred)
             release_cut_out()
             a = Image.fromarray((pred * 255).clip(0, 255).astype(np.uint8))
             a = a.resize(rgb.size, Image.Resampling.BILINEAR)
             out = rgb.copy()
-            out.putalpha(a)
+            out.putalpha(whole_if_empty(a))
             return out
         except Exception as exc:
             print("GPU cut-out failed (%s), using rembg" % exc, flush=True)
@@ -1300,7 +1342,9 @@ def cut_out(img):
     from rembg import remove, new_session
     if "s" not in _SESSION:
         _SESSION["s"] = new_session("birefnet-general")
-    return remove(rgb, session=_SESSION["s"])
+    out = remove(rgb, session=_SESSION["s"])
+    out.putalpha(whole_if_empty(out.getchannel("A")))
+    return out
 
 
 def nice(exc):

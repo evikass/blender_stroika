@@ -28,6 +28,17 @@ import urllib.request
 CHUNK = 1 << 20
 LOCK = threading.Lock()
 WORKERS = 4          # files fetched at the same time
+GENTLE = "--gentle" in sys.argv     # older computers: see main()
+RATE = 25 << 20      # bytes per second in gentle mode
+
+
+def _ease(start, done):
+    """Gentle mode: hold the speed at RATE and leave the disk some air."""
+    if not GENTLE:
+        return
+    ahead = done / float(RATE) - (time.time() - start)
+    if ahead > 0:
+        time.sleep(min(ahead, 1.0))
 
 
 def say(frac, text):
@@ -70,12 +81,19 @@ def url_of(comp, f):
 
 def sha256_of(path, done_cb=None):
     h = hashlib.sha256()
+    t0, n = time.time(), 0
     with open(path, "rb") as fh:
         while True:
             b = fh.read(CHUNK * 8)
             if not b:
                 break
             h.update(b)
+            n += len(b)
+            if GENTLE:
+                # reading back is lighter than writing: twice the speed
+                ahead = n / float(RATE * 2) - (time.time() - t0)
+                if ahead > 0:
+                    time.sleep(min(ahead, 1.0))
             if done_cb:
                 done_cb(len(b))
     return h.hexdigest()
@@ -132,13 +150,16 @@ def fetch(url, path, size, prog):
                 else:
                     mode = "ab" if have else "wb"
                 with open(part, mode) as out:
+                    t0_, got_ = time.time(), 0
                     while True:
                         b = r.read(CHUNK)
                         if not b:
                             break
                         out.write(b)
                         have += len(b)
+                        got_ += len(b)
                         prog.add(len(b))
+                        _ease(t0_, got_)
             if have == size:
                 return part
             raise IOError("got %d of %d bytes" % (have, size))
@@ -217,6 +238,33 @@ def hold_lock(root):
             time.sleep(2.0)
 
 
+_GPU_KIND = {}
+
+
+def gpu_kind():
+    """'fp4' on RTX 50 cards, 'int4' on the ones before: the 4-bit Qwen
+    image models come in one build for each."""
+    if "k" not in _GPU_KIND:
+        cc = 8.0
+        try:
+            r = subprocess.run(["nvidia-smi", "--query-gpu=compute_cap",
+                                "--format=csv,noheader"], capture_output=True,
+                               text=True, timeout=15,
+                               creationflags=0x08000000 if os.name == "nt"
+                               else 0)
+            cc = max(float(x) for x in r.stdout.split() if x.strip())
+        except Exception:
+            pass
+        _GPU_KIND["k"] = "fp4" if cc >= 10.0 else "int4"
+    return _GPU_KIND["k"]
+
+
+def comps_of(g, comps):
+    """The parts of a group this graphics card uses."""
+    return [c for c in g["comps"]
+            if comps[c].get("gpu") in (None, gpu_kind())]
+
+
 def main():
     a = [x for x in sys.argv[1:] if not x.startswith("--")]
     verify = "--verify" in sys.argv
@@ -227,7 +275,7 @@ def main():
     by_id = {g["id"]: g for g in m["groups"]}
     comps = []
     for gid in groups:
-        for c in by_id[gid]["comps"]:
+        for c in comps_of(by_id[gid], m["components"]):
             if c not in comps:
                 comps.append(c)
     name = " + ".join(by_id[g]["name"] for g in groups)
@@ -249,6 +297,12 @@ def main():
             print("ERROR %d file(s) were damaged and were removed - press "
                   "Download to get them again" % len(bad), flush=True)
             sys.exit(1)
+        # every file is right: finish a step that was waiting for the engine
+        for c in comps:
+            comp = m["components"][c]
+            if comp["dest"] != "hfcache" and os.path.isfile(os.path.join(
+                    root, *comp["dest"].split("/"), ".post_pending")):
+                post(comp, root)
         print("DONE verified", flush=True)
         return
 
@@ -290,7 +344,7 @@ def main():
                 errors.append("ERROR %s" % e)
 
     threads = [threading.Thread(target=worker, daemon=True)
-               for _ in range(WORKERS)]
+               for _ in range(1 if GENTLE else WORKERS)]
     for t in threads:
         t.start()
     for t in threads:

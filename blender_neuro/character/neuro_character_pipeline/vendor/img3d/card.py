@@ -185,7 +185,7 @@ TAB_STRIP = 26.0          # the sidebar collapsed to its tabs alone
 PAD = 15.0
 GAP = 9.0
 ROW = 34.0
-TAB = "Image to 3D"
+TAB = "Image to 3D 2"
 
 # Bake is hidden for now; it comes back in a later release
 SHOW_BAKE = False
@@ -3415,7 +3415,7 @@ def _build(context, region):
     # header ---------------------------------------------------------------
     w.append({"kind": "logo", "rect": (left, y[0] - 30.0, 30.0, 30.0)})
     w.append({"kind": "title", "rect": (left + 40.0, y[0] - 15.0, 0, 0),
-              "text": "Image to 3D", "room": inner - 40.0})
+              "text": "Image to 3D 2", "room": inner - 40.0})
     w.append({"kind": "sub", "rect": (left + 40.0, y[0] - 29.0, 0, 0),
               "text": "Textured 3D model from one picture",
               "room": inner - 40.0})
@@ -3608,12 +3608,22 @@ def _build(context, region):
         else:
             put("run", 44.0, text="Generate 3D", icon="cube", tip="generate",
                 act=("op", "img3d.generate"))
-            # Image to 3D 2 (in development): only shown when the Canvas
-            # add-on is installed, so buyers of this version never see it
-            if "img3d_canvas" in sys.modules:
-                put("btn", 30.0, text="Open Canvas", tip=None,
-                    act=("op", "img3d_canvas.open"))
+            # the node Canvas: works on its own once its picture models
+            # are installed; until then the card says what is missing
             _m_ = sys.modules.get(__package__)
+            put("btn", 30.0, text="Open Canvas", icon="cube", tip=None,
+                act=("op", "img3d_canvas.open"))
+            if _m_ is not None and not _m_.software_ready("CANVAS"):
+                note_line("The Canvas picture tools are not installed yet")
+                put("btn", 26.0, text="Install Canvas Tools",
+                    icon="package", tip=None,
+                    act=("call", ("img3d.install_engine",
+                                  {"target": "CANVAS"})))
+            elif _m_ is not None and not _m_.canvas_ready():
+                note_line("The Canvas models are not downloaded yet")
+                put("btn", 26.0, text="Go to Downloads", tip=None,
+                    act=("call", ("img3d.go_downloads",
+                                  {"group": "CV_QWEN_EDIT"})))
             if _m_ is not None and _m_.engine_ready("HI3D"):
                 put("switch", 26.0, gap=4.0, text="Enhance 3D Model",
                     on=st.auto_detail == "ON", tip="adetail",
@@ -3643,10 +3653,37 @@ def _build(context, region):
         foc_id = foc[0] if foc and time.time() - foc[1] < 12.0 else None
         open_, ph = panel_begin("downloads", "DOWNLOADS", "package")
         if open_:
+            _gp = _prefs()
+            if _gp is not None and hasattr(_gp, "gentle_download"):
+                put("switch", 26.0, gap=4.0, text="Gentle Download",
+                    on=bool(_gp.gentle_download),
+                    act=("prop", (_gp, "gentle_download")))
+                for _gl in _wrap("For older computers: one file at a "
+                                 "time, so the computer stays smooth"
+                                 if _gp.gentle_download else
+                                 "Turn on if the computer freezes while "
+                                 "downloading", inner, 11, scale):
+                    note_line(_gl)
+                y[0] -= 6.0
             run_ = _dl.DL
+            cat_ = None
             for g in _dl.groups():
                 gid = g["id"]
                 stt, have, total, _miss = _dl.status(root_, gid)
+                if g.get("cat") and g["cat"] != cat_:
+                    cat_ = g["cat"]
+                    y[0] -= 6.0
+                    w.append({"kind": "label",
+                              "rect": (left, y[0] - 12.0, 0, 0),
+                              "text": cat_.upper(), "size": 13,
+                              "color": ACCENT})
+                    y[0] -= 20.0
+                    for line in _wrap("Each Canvas node needs only its "
+                                      "own models: download the ones "
+                                      "for the nodes you use.", inner,
+                                      11, scale):
+                        note_line(line)
+                    y[0] -= 6.0
                 mine = _dl.busy() and gid in run_.get("groups", [])
                 hot = gid == foc_id
                 w.append({"kind": "label", "rect": (left, y[0] - 12.0, 0, 0),
@@ -3654,6 +3691,8 @@ def _build(context, region):
                                                   float(1 << 30)),
                           "size": 12, "color": ACCENT if hot else TEXT})
                 y[0] -= 18.0
+                if g.get("use"):
+                    note_line("For " + g["use"])
                 if mine:
                     spd_, eta_ = _dl.speed_text()
                     line = (run_.get("text") or "Downloading") + (
@@ -3661,14 +3700,19 @@ def _build(context, region):
                 elif stt == "ready":
                     line = "Installed"
                 elif stt == "pending":
-                    line = "Downloaded - finishes when the engine is installed"
+                    _eg = "HUNYUAN" if gid in ("HUNYUAN", "HUNYUAN_MV",
+                                               "HI3D") else "TRELLIS"
+                    _mm = sys.modules.get(__package__)
+                    line = ("Downloaded - press Finish Setup"
+                            if _mm is not None and _mm.software_ready(_eg)
+                            else "Downloaded - press Install Engine to finish")
                 elif stt == "partial":
                     line = "Partly downloaded (%d%%)" % int(
                         100.0 * have / max(1, total))
                 else:
                     line = "Not downloaded"
                 if g.get("needs") and stt != "ready" and not \
-                        _dl.ready(root_, g["needs"]):
+                        _dl.have(root_, g["needs"]):
                     line += " - also needs " + _dl.group(g["needs"])["name"]
                 note_line(line, ACCENT if mine else None)
                 if mine:
@@ -3687,6 +3731,20 @@ def _build(context, region):
                 elif stt == "ready":
                     # the Download button stays visible, greyed out
                     acts = (("Installed", None), check_, page_)
+                elif stt == "pending":
+                    # the files are here; the engine they run in is not
+                    eng_ = "HUNYUAN" if gid in ("HUNYUAN", "HUNYUAN_MV",
+                                                "HI3D") else "TRELLIS"
+                    _mm = sys.modules.get(__package__)
+                    if _mm is not None and _mm.software_ready(eng_):
+                        # the engine is there: only the last step is left
+                        acts = (("Finish Setup", ("call", (
+                            "img3d.dl_get", {"group": gid}))),
+                                check_, page_)
+                    else:
+                        acts = (("Install Engine", ("call", (
+                            "img3d.install_engine", {"target": eng_}))),
+                                check_, page_)
                 else:
                     acts = (("Download", ("call", ("img3d.dl_get",
                                                    {"group": gid}))),
@@ -3753,6 +3811,15 @@ def _build(context, region):
                                                 {"target": "EXTRAS"})))
                     if not _m_.software_ready("KLEIN"):
                         tex_t = None
+                if tex_t is not None and not _m_.software_ready("HUNYUAN"):
+                    # Enhance Texture and Enhance Detail run next to Hunyuan
+                    note_line("The Enhance tools run with the Hunyuan engine:")
+                    note_line("install it first (its models can stay as they are)")
+                    put("btn", 30.0, text="Install Hunyuan Engine",
+                        icon="package", tip=None,
+                        act=("call", ("img3d.install_engine",
+                                      {"target": "HUNYUAN"})))
+                    tex_t = None
                 if tex_t is not None and not _m_.klein_ready():
                     note_line("Enhance Texture is not downloaded yet")
                     put("btn", 26.0, text="Go to Downloads", tip=None,
@@ -4992,7 +5059,7 @@ class IMG3D_PT_tab(bpy.types.Panel):
     open and draws nothing at all - the card fills that space itself.
     """
 
-    bl_label = "Image to 3D"
+    bl_label = "Image to 3D 2"
     bl_idname = "IMG3D_PT_tab"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
@@ -5032,6 +5099,10 @@ class IMG3D_OT_overlay(bpy.types.Operator):
         if _state["quit"]:
             _state["modal"] = False
             return {"CANCELLED"}
+        if _dialog_open(context):
+            _state["hover"] = None
+            _state["tip"] = None
+            return {"PASS_THROUGH"}
         # The pointer's own viewport. The modal belongs to whichever 3D view
         # it was started in, and Blender gives its coordinates relative to
         # that one - so in a split screen every click on the other card
@@ -5356,6 +5427,23 @@ def _showing():
                     if (r.type == "UI" and r.width >= 60
                             and getattr(r, "active_panel_category", "") == TAB):
                         return True
+    except Exception:
+        pass
+    return False
+
+
+def _dialog_open(context):
+    """A file window (export, open, choose image) or another Blender window
+    is up: its clicks are its own, the card must not take them."""
+    try:
+        wm = context.window_manager
+        main = context.window
+        for win in wm.windows:
+            if win == main:
+                continue
+            for area in win.screen.areas:
+                if area.type == "FILE_BROWSER":
+                    return True
     except Exception:
         pass
     return False
@@ -5726,14 +5814,14 @@ def unregister():
 WELCOME = {"on": False, "handle": None, "region": None, "rects": {},
            "hover": None}
 
-WELCOME_TITLE = "Thank you for choosing Image to 3D"
+WELCOME_TITLE = "Thank you for choosing Image to 3D 2"
 WELCOME_LINES = (
     "Your feedback is what shapes this add-on.",
     "Any thought, question or idea is very welcome,",
     "and I read every one.",
     "",
     "If a model will not generate, press Save Report",
-    "on the Image to 3D panel. It saves a report file",
+    "on the Image to 3D 2 panel. It saves a report file",
     "on your Desktop. Send it to me and I will fix it",
     "for your system.",
     "",

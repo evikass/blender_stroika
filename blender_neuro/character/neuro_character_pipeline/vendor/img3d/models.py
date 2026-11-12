@@ -19,11 +19,48 @@ import bpy
 ADDON_DIR = os.path.dirname(os.path.abspath(__file__))
 MANIFEST = os.path.join(ADDON_DIR, "models_manifest.json")
 NOWINDOW = 0x08000000 if os.name == "nt" else 0
+# below normal priority: a download never makes the computer stutter
+LOWPRIO = 0x00004000 if sys.platform == "win32" else 0
 
 _M = {}
 _CACHE = {"t": 0.0, "root": None, "status": {}}
 DL = {"p": None, "q": None, "groups": [], "frac": 0.0, "text": "",
       "error": "", "done": "", "t0": 0.0}
+
+
+_GPU_KIND = {}
+
+
+def gpu_kind():
+    """'fp4' on RTX 50 cards, 'int4' on the ones before: the 4-bit Qwen
+    image models come in one build for each."""
+    if "k" not in _GPU_KIND:
+        cc = 8.0
+        try:
+            r = subprocess.run(["nvidia-smi", "--query-gpu=compute_cap",
+                                "--format=csv,noheader"], capture_output=True,
+                               text=True, timeout=15,
+                               creationflags=0x08000000 if os.name == "nt"
+                               else 0)
+            cc = max(float(x) for x in r.stdout.split() if x.strip())
+        except Exception:
+            pass
+        _GPU_KIND["k"] = "fp4" if cc >= 10.0 else "int4"
+        _GPU_KIND["cc"] = cc
+    return _GPU_KIND["k"]
+
+
+def gpu_cc():
+    """The card's compute capability: 7.5 is RTX 20 / GTX 16, 8.x RTX 30
+    and 40, 12.0 RTX 50."""
+    gpu_kind()
+    return _GPU_KIND.get("cc", 8.0)
+
+
+def comps_of(g, comps):
+    """The parts of a group this graphics card uses."""
+    return [c for c in g["comps"]
+            if comps[c].get("gpu") in (None, gpu_kind())]
 
 
 def manifest():
@@ -104,10 +141,11 @@ def _scan(root):
             if comp["dest"] != "hfcache" else False
         comp_state[cid] = (have, total, miss, pend)
     for g in m["groups"]:
-        have = sum(comp_state[c][0] for c in g["comps"])
-        total = sum(comp_state[c][1] for c in g["comps"])
-        miss = [(c, p) for c in g["comps"] for p in comp_state[c][2]]
-        pend = any(comp_state[c][3] for c in g["comps"])
+        cs = comps_of(g, m["components"])
+        have = sum(comp_state[c][0] for c in cs)
+        total = sum(comp_state[c][1] for c in cs)
+        miss = [(c, p) for c in cs for p in comp_state[c][2]]
+        pend = any(comp_state[c][3] for c in cs)
         out[g["id"]] = (have, total, miss, pend)
     return out
 
@@ -139,6 +177,11 @@ def ready(root, gid):
     return status(root, gid)[0] == "ready"
 
 
+def have(root, gid):
+    """Every file is on disk (some may still wait for the engine install)."""
+    return status(root, gid)[0] in ("ready", "pending")
+
+
 def size_gb(gid):
     g = group(gid)
     return g["size"] / float(1 << 30) if g else 0.0
@@ -148,7 +191,8 @@ def needed_for(engine, root):
     """The download groups an engine needs that are not on disk yet."""
     need = {"TRELLIS": ["TRELLIS"], "PIXAL3D": ["PIXAL3D"],
             "HUNYUAN": ["HUNYUAN"], "HI3D": ["HUNYUAN", "HI3D"],
-            "KLEIN": ["KLEIN"]}.get(engine, [engine])
+            "KLEIN": ["KLEIN"],
+            "CANVAS": ["CV_QWEN_EDIT", "CV_QWEN_EDIT_4BIT"]}.get(engine, [engine])
     return [g for g in need if not ready(root, g)]
 
 
@@ -179,12 +223,30 @@ def start(root, gids, verify=False, redraw=None):
             MANIFEST, root, hf_cache(), os.path.join(ADDON_DIR, "model_patches")]
     if verify:
         args.append("--verify")
+    try:
+        _pp = bpy.context.preferences.addons[__package__].preferences
+    except Exception:
+        _pp = None
+    if _pp is None:
+        # вшитая копия: галка Gentle Download живёт в мастер-аддоне
+        try:
+            for _k in bpy.context.preferences.addons.keys():
+                if _k.rsplit(".", 1)[-1] == "neuro_character_pipeline":
+                    _pp = bpy.context.preferences.addons[_k].preferences
+                    break
+        except Exception:
+            _pp = None
+    try:
+        if getattr(_pp, "gentle_download", False):
+            args.append("--gentle")
+    except Exception:
+        pass
     args += list(gids)
     q = queue.Queue()
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     p = subprocess.Popen(args, cwd=root, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                         creationflags=NOWINDOW, env=env)
+                         creationflags=NOWINDOW | LOWPRIO, env=env)
     threading.Thread(target=_reader, args=(p, q), daemon=True).start()
     DL.update(p=p, q=q, groups=list(gids), frac=0.0, error="", done="",
               text="Checking files" if verify else "Starting download",
@@ -302,7 +364,14 @@ NAMES = {"trellis2": "TRELLIS.2 (main model)",
          "dinov2l": "DINOv2 large",
          "clipl": "CLIP large",
          "klein": "FLUX.2 Klein 4B",
-         "marigold": "Marigold (takes the shine out of the texture)"}
+         "marigold": "Marigold (takes the shine out of the texture)",
+         "qwen_edit": "Qwen-Image-Edit-2509 (text model, VAE)",
+         "qwen_edit_fp4": "Qwen-Image-Edit-2509 Nunchaku FP4 (RTX 50)",
+         "qwen_edit_int4": "Qwen-Image-Edit-2509 Nunchaku INT4",
+         "qwen_image": "Qwen-Image (tokenizer)",
+         "qwen_image_fp4": "Qwen-Image Nunchaku FP4 (RTX 50)",
+         "qwen_image_int4": "Qwen-Image Nunchaku INT4",
+         "sam3": "SAM 3 (finds the parts)"}
 
 
 def part_folder(cid, root):
@@ -318,7 +387,7 @@ def parts(gid, root):
     """[(id, name, page, folder, files, ready)] for the hand-download list"""
     out = []
     m = manifest()
-    for cid in group(gid)["comps"]:
+    for cid in comps_of(group(gid), m["components"]):
         comp = m["components"][cid]
         ok = all(_file_ok(comp, f, root) for f in comp["files"])
         out.append((cid, NAMES.get(cid, cid), comp.get("page", ""),

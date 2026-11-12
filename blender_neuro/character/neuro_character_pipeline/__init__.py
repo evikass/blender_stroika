@@ -11,7 +11,7 @@ URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слета
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 1, 0),
+    "version": (2, 2, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -596,6 +596,11 @@ class NCP_AddonPrefs(bpy.types.AddonPreferences):
     comfyui_port: IntProperty(
         name="Port", default=8188, min=1024, max=65535,
         description="Порт автозапуска (должен совпадать с URL)")
+    gentle_download: BoolProperty(
+        name="Gentle Download", default=False,
+        description="Для слабых компьютеров: качать по одному файлу и "
+                    "медленнее, чтобы компьютер не подвисал во время "
+                    "загрузки AI-моделей")
 
     def draw(self, context):
         lay = self.layout
@@ -611,6 +616,7 @@ class NCP_AddonPrefs(bpy.types.AddonPreferences):
                   icon="INFO")
         col.label(text="Папка сохраняется навсегда и переживает "
                        "переустановку аддона", icon="CHECKMARK")
+        col.prop(self, "gentle_download")
         col = lay.column(align=True)
         col.label(text="Постоянные настройки конвейера", icon="LOCKED")
         col.prop(self, "comfy_url")
@@ -1109,6 +1115,8 @@ def _build_env_report(context):
         add("  comfyui_python: %r" % (getattr(p, "comfyui_python", "") or ""))
         add("  engine_dir: %r" % (getattr(p, "engine_dir", "") or ""))
         add("  out_dir: %r" % (getattr(p, "out_dir", "") or ""))
+        add("  gentle_download: %s" % bool(getattr(p, "gentle_download",
+                                                   False)))
     else:
         add("  <AddonPreferences недоступны>")
     add("")

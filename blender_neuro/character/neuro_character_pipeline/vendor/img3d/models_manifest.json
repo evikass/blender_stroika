@@ -63,6 +63,81 @@
         "marigold"
       ],
       "size": 18561898031
+    },
+    {
+      "id": "CV_QWEN_EDIT",
+      "name": "Qwen-Image-Edit (text model)",
+      "comps": [
+        "qwen_edit"
+      ],
+      "size": 16859227523,
+      "cat": "Canvas",
+      "use": "Multi View, Prompt and Find Parts"
+    },
+    {
+      "id": "CV_QWEN_EDIT_4BIT",
+      "name": "Qwen-Image-Edit 4-bit",
+      "comps": [
+        "qwen_edit_fp4",
+        "qwen_edit_int4"
+      ],
+      "size": 11948923656,
+      "cat": "Canvas",
+      "use": "Multi View and Prompt",
+      "needs": "CV_QWEN_EDIT"
+    },
+    {
+      "id": "CV_QWEN_IMAGE",
+      "name": "Qwen-Image 4-bit",
+      "comps": [
+        "qwen_image",
+        "qwen_image_fp4",
+        "qwen_image_int4"
+      ],
+      "size": 11953999889,
+      "cat": "Canvas",
+      "use": "Prompt (the sharper picture model)",
+      "needs": "CV_QWEN_EDIT_4BIT"
+    },
+    {
+      "id": "CV_SAM3",
+      "name": "SAM 3",
+      "comps": [
+        "sam3"
+      ],
+      "size": 3445029864,
+      "cat": "Canvas",
+      "use": "Find Parts (exact outlines)"
+    },
+    {
+      "id": "CV_KLEIN",
+      "name": "FLUX.2 Klein",
+      "comps": [
+        "klein"
+      ],
+      "size": 15980131745,
+      "cat": "Canvas",
+      "use": "the part pictures (Start)"
+    },
+    {
+      "id": "CV_BIREFNET",
+      "name": "BiRefNet",
+      "comps": [
+        "birefnet"
+      ],
+      "size": 444570957,
+      "cat": "Canvas",
+      "use": "Prompt with 3D Ready (clean background)"
+    },
+    {
+      "id": "CV_ESRGAN",
+      "name": "Real-ESRGAN",
+      "comps": [
+        "realesrgan"
+      ],
+      "size": 67040989,
+      "cat": "Canvas",
+      "use": "Upscale"
     }
   ],
   "components": {
@@ -878,6 +953,328 @@
           "size": 175997641,
           "sha256": "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
           "url": "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx"
+        }
+      ]
+    },
+    "qwen_edit": {
+      "source": "hf",
+      "repo": "Qwen/Qwen-Image-Edit-2509",
+      "revision": "d3968ef930e841f4c73640fb8afa3b306a78167e",
+      "dest": "models/Qwen-Image-Edit-2509",
+      "page": "https://huggingface.co/Qwen/Qwen-Image-Edit-2509/tree/d3968ef930e841f4c73640fb8afa3b306a78167e",
+      "files": [
+        {
+          "path": "model_index.json",
+          "size": 516,
+          "sha256": null
+        },
+        {
+          "path": "processor/added_tokens.json",
+          "size": 605,
+          "sha256": null
+        },
+        {
+          "path": "processor/chat_template.jinja",
+          "size": 1017,
+          "sha256": null
+        },
+        {
+          "path": "processor/merges.txt",
+          "size": 1671853,
+          "sha256": null
+        },
+        {
+          "path": "processor/preprocessor_config.json",
+          "size": 788,
+          "sha256": null
+        },
+        {
+          "path": "processor/special_tokens_map.json",
+          "size": 613,
+          "sha256": null
+        },
+        {
+          "path": "processor/tokenizer.json",
+          "size": 11421896,
+          "sha256": "9c5ae00e602b8860cbd784ba82a8aa14e8feecec692e7076590d014d7b7fdafa"
+        },
+        {
+          "path": "processor/tokenizer_config.json",
+          "size": 4727,
+          "sha256": null
+        },
+        {
+          "path": "processor/video_preprocessor_config.json",
+          "size": 904,
+          "sha256": null
+        },
+        {
+          "path": "processor/vocab.json",
+          "size": 2776833,
+          "sha256": null
+        },
+        {
+          "path": "scheduler/scheduler_config.json",
+          "size": 485,
+          "sha256": null
+        },
+        {
+          "path": "text_encoder/config.json",
+          "size": 3217,
+          "sha256": null
+        },
+        {
+          "path": "text_encoder/generation_config.json",
+          "size": 244,
+          "sha256": null
+        },
+        {
+          "path": "text_encoder/model-00001-of-00004.safetensors",
+          "size": 4968243304,
+          "sha256": "d725335e4ea2399be706469e4b8807716a8fa64bd03468252e9f7acf2415fee4"
+        },
+        {
+          "path": "text_encoder/model-00002-of-00004.safetensors",
+          "size": 4991495816,
+          "sha256": "b1830db6908dcc76df3a71492acbcf2b8cac130114cf1f3c2d9edae8de8c6de3"
+        },
+        {
+          "path": "text_encoder/model-00003-of-00004.safetensors",
+          "size": 4932751040,
+          "sha256": "09c1807c6d00d7cab94f7db39d4c02ebb8537225ccde383861ac48db97945aa6"
+        },
+        {
+          "path": "text_encoder/model-00004-of-00004.safetensors",
+          "size": 1691924384,
+          "sha256": "5dd068336d14d45ffb43cef374d286cc6ba9d8741b028f90a7d040d847961f4a"
+        },
+        {
+          "path": "text_encoder/model.safetensors.index.json",
+          "size": 57655,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/added_tokens.json",
+          "size": 605,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/chat_template.jinja",
+          "size": 2427,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/merges.txt",
+          "size": 1671853,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/special_tokens_map.json",
+          "size": 613,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/tokenizer_config.json",
+          "size": 4686,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/vocab.json",
+          "size": 3383407,
+          "sha256": null
+        },
+        {
+          "path": "transformer/config.json",
+          "size": 339,
+          "sha256": null
+        },
+        {
+          "path": "vae/config.json",
+          "size": 730,
+          "sha256": null
+        },
+        {
+          "path": "vae/diffusion_pytorch_model.safetensors",
+          "size": 253806966,
+          "sha256": "0c8bc8b758c649abef9ea407b95408389a3b2f610d0d10fcb054fe171d0a8344"
+        }
+      ]
+    },
+    "qwen_edit_fp4": {
+      "source": "hf",
+      "repo": "nunchaku-ai/nunchaku-qwen-image-edit-2509",
+      "revision": "e93a5fb77403d02a5a73c7cc8707b292c6ebc659",
+      "dest": "models/nunchaku",
+      "page": "https://huggingface.co/nunchaku-ai/nunchaku-qwen-image-edit-2509/tree/e93a5fb77403d02a5a73c7cc8707b292c6ebc659",
+      "files": [
+        {
+          "path": "lightning-251115/svdq-fp4_r32-qwen-image-edit-2509-lightning-8steps-251115.safetensors",
+          "size": 11948923656,
+          "sha256": "c0c11d08dc376227a637314fae752f6f42f79f5c22d9a722ac7c3ca12361b8b0"
+        }
+      ],
+      "gpu": "fp4"
+    },
+    "qwen_image_fp4": {
+      "source": "hf",
+      "repo": "nunchaku-ai/nunchaku-qwen-image",
+      "revision": "4d9f4f667ea571ab172e0ee29ac2c27b82a41a6b",
+      "dest": "models/nunchaku/qwen-image",
+      "page": "https://huggingface.co/nunchaku-ai/nunchaku-qwen-image/tree/4d9f4f667ea571ab172e0ee29ac2c27b82a41a6b",
+      "files": [
+        {
+          "path": "svdq-fp4_r32-qwen-image-lightningv1.1-8steps.safetensors",
+          "size": 11948923656,
+          "sha256": "f434c5bd4df45e80b02aa54b0a544627077b2f265e70523224fe0e9093945d12"
+        }
+      ],
+      "gpu": "fp4"
+    },
+    "qwen_edit_int4": {
+      "source": "hf",
+      "repo": "nunchaku-ai/nunchaku-qwen-image-edit-2509",
+      "revision": "e93a5fb77403d02a5a73c7cc8707b292c6ebc659",
+      "dest": "models/nunchaku",
+      "page": "https://huggingface.co/nunchaku-ai/nunchaku-qwen-image-edit-2509/tree/e93a5fb77403d02a5a73c7cc8707b292c6ebc659",
+      "files": [
+        {
+          "path": "lightning-251115/svdq-int4_r32-qwen-image-edit-2509-lightning-8steps-251115.safetensors",
+          "size": 11521979944,
+          "sha256": "36cd9713dde9632f1366aff29d7450e7926cfef35f00206ada8a203059702348"
+        }
+      ],
+      "gpu": "int4"
+    },
+    "qwen_image_int4": {
+      "source": "hf",
+      "repo": "nunchaku-ai/nunchaku-qwen-image",
+      "revision": "4d9f4f667ea571ab172e0ee29ac2c27b82a41a6b",
+      "dest": "models/nunchaku/qwen-image",
+      "page": "https://huggingface.co/nunchaku-ai/nunchaku-qwen-image/tree/4d9f4f667ea571ab172e0ee29ac2c27b82a41a6b",
+      "files": [
+        {
+          "path": "svdq-int4_r32-qwen-image-lightningv1.1-8steps.safetensors",
+          "size": 11521979944,
+          "sha256": "7d17b813a2ac7217d9b55cdc3b893c545add12f8f42d8e32c1daa546b1cc3e9e"
+        }
+      ],
+      "gpu": "int4"
+    },
+    "qwen_image": {
+      "source": "hf",
+      "repo": "Qwen/Qwen-Image",
+      "revision": "75e0b4be04f60ec59a75f475837eced720f823b6",
+      "dest": "models/Qwen-Image",
+      "page": "https://huggingface.co/Qwen/Qwen-Image/tree/75e0b4be04f60ec59a75f475837eced720f823b6",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 11343,
+          "sha256": null
+        },
+        {
+          "path": "model_index.json",
+          "size": 443,
+          "sha256": null
+        },
+        {
+          "path": "scheduler/scheduler_config.json",
+          "size": 485,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/added_tokens.json",
+          "size": 605,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/chat_template.jinja",
+          "size": 2427,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/merges.txt",
+          "size": 1671853,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/special_tokens_map.json",
+          "size": 613,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/tokenizer_config.json",
+          "size": 4686,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer/vocab.json",
+          "size": 3383407,
+          "sha256": null
+        },
+        {
+          "path": "transformer/config.json",
+          "size": 371,
+          "sha256": null
+        }
+      ]
+    },
+    "sam3": {
+      "source": "hf",
+      "repo": "jetjodh/sam3",
+      "revision": "1aa50ce07302cb375f85d8084b68a0fb378b8d85",
+      "dest": "models/facebook/sam3",
+      "page": "https://huggingface.co/jetjodh/sam3/tree/1aa50ce07302cb375f85d8084b68a0fb378b8d85",
+      "files": [
+        {
+          "path": "LICENSE",
+          "size": 7352,
+          "sha256": null
+        },
+        {
+          "path": "README.md",
+          "size": 26038,
+          "sha256": null
+        },
+        {
+          "path": "config.json",
+          "size": 25843,
+          "sha256": null
+        },
+        {
+          "path": "merges.txt",
+          "size": 524619,
+          "sha256": null
+        },
+        {
+          "path": "model.safetensors",
+          "size": 3439938512,
+          "sha256": "6d06f0a5f84e435071fe6603e61d0b4cc7b40e0d39d487cfd4d67d8cc11cc14a"
+        },
+        {
+          "path": "processor_config.json",
+          "size": 1712,
+          "sha256": null
+        },
+        {
+          "path": "special_tokens_map.json",
+          "size": 588,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer.json",
+          "size": 3642073,
+          "sha256": null
+        },
+        {
+          "path": "tokenizer_config.json",
+          "size": 799,
+          "sha256": null
+        },
+        {
+          "path": "vocab.json",
+          "size": 862328,
+          "sha256": null
         }
       ]
     }
