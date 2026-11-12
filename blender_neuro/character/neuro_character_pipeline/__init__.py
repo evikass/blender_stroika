@@ -9,7 +9,7 @@ N-панель 3D-вьюпорта, категория "Neuro".
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > Neuro",
     "description": "Картинка -> 3D-меш -> neuro-скелет -> мышцы -> анимация",
@@ -138,10 +138,21 @@ def _build_rig(context, mesh):
         _clear_old_rig()
     spec = neuro_rig.load_spec(bpy.path.abspath(st.spec_path)
                                if st.spec_path else "")
+    rot_x, rot_z = st.mesh_rot_x, st.mesh_rot_z
+    if st.orient_auto:
+        rot_x, rot_z = neuro_rig.guess_orientation(mesh)
+        st.mesh_rot_x, st.mesh_rot_z = rot_x, rot_z
     arm = neuro_rig.build_armature(spec, name="NeuroCharacter")
+    if st.add_fingers:
+        neuro_rig.add_finger_chains(arm)
     neuro_rig.fit_mesh_to_skeleton(
-        mesh, spec, rot_x_deg=st.mesh_rot_x, do_apply=st.apply_transforms)
+        mesh, spec, rot_x_deg=rot_x, rot_z_deg=rot_z,
+        do_apply=st.apply_transforms)
     neuro_rig.skin_mesh_to_armature(mesh, arm)
+    if st.orient_auto and (abs(rot_x) > 1e-6 or abs(rot_z) > 1e-6):
+        _st(context).status = ("Меш повёрнут (авто): X%+g°, Z%+g° — "
+                               "если смотрит назад, поставьте rot Z = -90"
+                               % (rot_x, rot_z))
     return arm
 
 
@@ -357,6 +368,15 @@ class NCP_Props(bpy.types.PropertyGroup):
         name="Mesh rot X", default=0.0, min=-180.0, max=180.0,
         description="Доворот меша вокруг X (градусы), если персонаж "
                     "лежит/стоит не так")
+    orient_auto: BoolProperty(
+        name="Auto-orient", default=True,
+        description="Определить по bbox: лежит ли меш и куда смотрит; "
+                    "найденные углы запишутся в Mesh rot X/Z")
+    mesh_rot_z: FloatProperty(
+        name="Mesh rot Z", default=0.0, min=-180.0, max=180.0,
+        description="Доворот меша вокруг Z (куда смотрит персонаж). "
+                    "0 = смотрит +X, как neuro-скелет; если после "
+                    "авто-определения смотрит назад — поставьте -90")
     apply_transforms: BoolProperty(
         name="Apply transforms", default=True,
         description="Запечь масштаб/поворот меша перед скинингом "
@@ -364,6 +384,12 @@ class NCP_Props(bpy.types.PropertyGroup):
     replace_existing: BoolProperty(
         name="Replace skeleton", default=True,
         description="Удалить старый NeuroCharacter и пересоздать")
+    add_fingers: BoolProperty(
+        name="Add fingers", default=False,
+        description="Добавить 20 костей пальцев (10 на руку) поверх "
+                    "18 neuro-костей — для позирования/экспорта. "
+                    "neurosim анимирует только 18 основных костей, "
+                    "пальцы едут вместе с рукой")
     # --- шаг 5: мышцы
     muscle_style: EnumProperty(
         name="Style",
@@ -578,12 +604,15 @@ class NCP_OT_build_skeleton(bpy.types.Operator):
     def execute(self, context):
         mesh = _find_skin_mesh(context)
         if mesh is None:
+            _fail(context, "Нет меша: сгенерируйте или выделите меш "
+                           "персонажа")
             self.report({"ERROR"}, "Нет меша: сгенерируйте или выделите "
                                    "меш персонажа")
             return {"CANCELLED"}
         try:
             _build_rig(context, mesh)
         except Exception as e:
+            _fail(context, "Скелет: %s: %s" % (type(e).__name__, e))
             self.report({"ERROR"}, "%s: %s" % (type(e).__name__, e))
             return {"CANCELLED"}
         self.report({"INFO"}, "Скелет NeuroCharacter готов, весы назначены")
@@ -599,14 +628,28 @@ class NCP_OT_add_muscles(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return (not JOB["active"] and ncp_muscles.installed()
-                and bpy.data.objects.get("NeuroCharacter") is not None)
+        return not JOB["active"]
 
     def execute(self, context):
+        st = _st(context)
         arm = bpy.data.objects.get("NeuroCharacter")
+        if arm is None:
+            _fail(context, "Сначала постройте скелет (шаг 4)")
+            self.report({"ERROR"}, "Сначала постройте скелет (шаг 4)")
+            return {"CANCELLED"}
+        if not ncp_muscles.installed():
+            msg = ("X-Muscle System не включён — включите его в "
+                   "Preferences -> Add-ons (поиск: X-Muscle)")
+            _fail(context, msg)
+            self.report({"ERROR"}, msg)
+            return {"CANCELLED"}
         try:
             created, delta, errors = ncp_muscles.create_all(context, arm)
-            if _st(context).attach_skin:
+            if created == 0:
+                raise RuntimeError("Ни одной мышцы не создано: %s"
+                                   % ("; ".join(errors[:3])
+                                      or "причина неизвестна"))
+            if st.attach_skin:
                 mesh = _find_skin_mesh(context)
                 ncp_muscles.attach_to_skin(context, mesh)
                 ncp_muscles.enable_dynamics()
@@ -614,10 +657,15 @@ class NCP_OT_add_muscles(bpy.types.Operator):
             else:
                 msg = "Мышцы создано: %d" % created
             if errors:
-                self.report({"WARNING"}, msg + " | " + "; ".join(errors[:3]))
+                msg += ". Пропуски: " + "; ".join(errors[:3])
+            st.state = "IDLE"
+            st.status = msg
+            if errors:
+                self.report({"WARNING"}, msg)
             else:
                 self.report({"INFO"}, msg)
         except Exception as e:
+            _fail(context, "Мышцы: %s" % e)
             self.report({"ERROR"}, "%s: %s" % (type(e).__name__, e))
             return {"CANCELLED"}
         return {"FINISHED"}
@@ -639,6 +687,7 @@ class NCP_OT_attach_muscles(bpy.types.Operator):
             n = ncp_muscles.attach_to_skin(context, _find_skin_mesh(context))
             self.report({"INFO"}, "Пришито мышц: %d" % n)
         except Exception as e:
+            _fail(context, "Пришивание мышц: %s" % e)
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
         return {"FINISHED"}
@@ -660,6 +709,7 @@ class NCP_OT_bake_muscles(bpy.types.Operator):
             ncp_muscles.bake_caches(context)
             self.report({"INFO"}, "Кэши мышц запечены")
         except Exception as e:
+            _fail(context, "Запекание мышц: %s" % e)
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
         return {"FINISHED"}
@@ -698,6 +748,8 @@ class NCP_OT_import_motion(bpy.types.Operator, ImportHelper):
                 neuro_rig.add_ground()
                 neuro_rig.build_world_props(payload["world"])
         except Exception as e:
+            _fail(context, "Импорт движения: %s: %s"
+                  % (type(e).__name__, e))
             self.report({"ERROR"}, "%s: %s" % (type(e).__name__, e))
             return {"CANCELLED"}
         self.report({"INFO"}, "Анимация: %d кадров @ %.0f fps" % (n, fps))
@@ -1018,9 +1070,16 @@ class NCP_PT_rig(_NCPSubPanel):
              icon="ARMATURE_DATA")
         row = lay.row(align=True)
         row.prop(st, "mesh_rot_x")
+        row.prop(st, "mesh_rot_z")
+        row = lay.row(align=True)
+        row.prop(st, "orient_auto")
+        row.prop(st, "add_fingers")
+        row = lay.row(align=True)
         row.prop(st, "replace_existing", text="Replace")
-        lay.prop(st, "apply_transforms")
-        _hint(lay, "human.json: 18 костей, меш подгонится, автовесы")
+        row.prop(st, "apply_transforms", text="Apply")
+        _hint(lay, "18 neuro-костей (RL-контракт human.json), "
+                   "меш подгонится и повернётся сам; пальцы — опция "
+                   "для позирования")
 
 
 class NCP_PT_muscles(_NCPSubPanel):
@@ -1037,8 +1096,8 @@ class NCP_PT_muscles(_NCPSubPanel):
         if not ncp_muscles.installed():
             row = lay.row()
             row.alert = True
-            row.label(text="X-Muscle System не включён (Blender 5.0)",
-                      icon="ERROR")
+            row.label(text="X-Muscle System не включён — включите его в "
+                           "Preferences -> Add-ons", icon="ERROR")
         else:
             lay.label(text="Мышц в сцене: %d"
                       % len(ncp_muscles.muscle_objects()), icon="MOD_SOFT")

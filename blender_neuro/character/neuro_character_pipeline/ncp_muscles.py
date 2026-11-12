@@ -36,12 +36,15 @@ _STYLE_OP = {
 
 
 def resolve():
+    """Модуль X-Muscle System: обычный аддон или расширение bl_ext.*.
+    Не путаем с X-Muscle Pie Menu (в его ключе тоже есть 'xmuscle')."""
     try:
-        prefs = bpy.context.preferences.addons
+        keys = list(bpy.context.preferences.addons.keys())
     except Exception:
         return None
-    for k in prefs.keys():
-        if k == "xmusclesystem" or k.endswith(".xmusclesystem"):
+    for k in keys:
+        lk = k.lower()
+        if "xmuscle" in lk and "piemenu" not in lk:
             return sys.modules.get(k)
     return None
 

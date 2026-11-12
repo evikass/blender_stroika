@@ -230,15 +230,44 @@ def _world_bbox(obj):
     return mn, mx
 
 
-def fit_mesh_to_skeleton(mesh, spec, rot_x_deg=0.0, do_apply=True):
-    """Масштаб/позиция меша под neuro-скелет: рост по спеку, низ в z=0,
-    центр xy в (0,0). Скелет не трогаем (контракт анимации в метрах)."""
+def orientation_from_extents(ex, ey, ez):
+    """(rot_x_deg, rot_z_deg) по габаритам меша, чтобы он стоял (Z-up)
+    и смотрел вдоль +X, как neuro-скелет.
+
+    У T-pose гуманоида глубина (спина-грудь) — самая маленькая сторона
+    bbox. Она и есть "взгляд": вдоль X — уже смотрит +X; вдоль Y —
+    повернуть на +90 (Blender-фронт -Y -> +X); вдоль Z — меш лежит на
+    спине (Y-up движка), поднять на +90 вокруг X и довернуть на +90.
+    Ничего не знаем о знаке (лицо/затылок неразличимы по bbox) — если
+    угадали назад, пользователю достаточно Mesh rot Z = -90."""
+    vals = (("x", ex), ("y", ey), ("z", ez))
+    depth = min(vals, key=lambda kv: kv[1])[0]
+    if depth == "x":
+        return 0.0, 0.0
+    if depth == "y":
+        return 0.0, 90.0
+    return 90.0, 90.0
+
+
+def guess_orientation(mesh):
+    """Авто-углы для меша по его мировому bbox."""
+    mn, mx = _world_bbox(mesh)
+    return orientation_from_extents(mx.x - mn.x, mx.y - mn.y, mx.z - mn.z)
+
+
+def fit_mesh_to_skeleton(mesh, spec, rot_x_deg=0.0, rot_z_deg=0.0,
+                         do_apply=True):
+    """Масштаб/позиция меша под neuro-скелет: повороты X/Z (ориентация),
+    рост по спеку, низ в z=0, центр xy в (0,0). Скелет не трогаем
+    (контракт анимации в метрах)."""
     try:
         bpy.ops.object.mode_set(mode="OBJECT")
     except RuntimeError:
         pass
     if abs(rot_x_deg) > 1e-6:
         mesh.rotation_euler.x += math.radians(rot_x_deg)
+    if abs(rot_z_deg) > 1e-6:
+        mesh.rotation_euler.z += math.radians(rot_z_deg)
     bpy.context.view_layer.update()
 
     h = spec_height(spec)
@@ -263,6 +292,63 @@ def fit_mesh_to_skeleton(mesh, spec, rot_x_deg=0.0, do_apply=True):
         bpy.ops.object.transform_apply(location=False, rotation=True,
                                        scale=True)
     return s
+
+
+# ------------------------------------------------------------- пальцы
+
+# (имя, сдвиг по Z от ладони, длина цепочки, м) — косметика для позирования
+FINGER_PLAN = (
+    ("thumb", 0.030, 0.062),
+    ("index", 0.012, 0.078),
+    ("middle", 0.000, 0.084),
+    ("ring", -0.012, 0.078),
+    ("pinky", -0.030, 0.062),
+)
+
+
+def finger_bone_names():
+    """Имена 20 добавочных костей пальцев (в спеке human.json их нет)."""
+    out = []
+    for side in ("L", "R"):
+        for fname, _off, _ln in FINGER_PLAN:
+            out.append("fng_%s_1_%s" % (fname, side))
+            out.append("fng_%s_2_%s" % (fname, side))
+    return out
+
+
+def add_finger_chains(arm_obj):
+    """По 10 костей пальцев от концов предплечий farm_L/farm_R.
+    neuro-анимация (apply_animation) ведёт только кости спеки, пальцы
+    просто едут вместе с рукой — на контракт нейросима не влияют."""
+    arm_data = arm_obj.data
+    try:
+        bpy.ops.object.mode_set(mode="OBJECT")
+    except RuntimeError:
+        pass
+    bpy.context.view_layer.objects.active = arm_obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    made = 0
+    for side, par in (("L", "farm_L"), ("R", "farm_R")):
+        eb_p = arm_data.edit_bones.get(par)
+        if eb_p is None:
+            continue
+        base = eb_p.tail + eb_p.vector * (eb_p.length + 0.07)
+        for fname, off_z, ln in FINGER_PLAN:
+            head = base + Vector((0.0, 0.0, off_z))
+            parent = eb_p
+            for seg in (1, 2):
+                eb = arm_data.edit_bones.new(
+                    "fng_%s_%d_%s" % (fname, seg, side))
+                eb.head = head
+                eb.tail = head + eb_p.vector * (ln * (0.55 if seg == 1
+                                                     else 0.45))
+                eb.roll = 0.0
+                eb.parent = parent
+                head = eb.tail
+                parent = eb
+                made += 1
+    bpy.ops.object.mode_set(mode="OBJECT")
+    return made
 
 
 def skin_mesh_to_armature(mesh, arm_obj):
