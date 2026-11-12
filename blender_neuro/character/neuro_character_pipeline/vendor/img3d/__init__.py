@@ -43,16 +43,31 @@ _PROC = {"p": None, "q": None, "kind": None, "out": None, "lines": []}
 
 # -- where the engine lives ---------------------------------------------------
 
-# All-in-One: AddonPreferences недоступен (bl_idname обязан совпадать
-# с id расширения) — движок ищем в стандартном пути 3DRedbox.
+# All-in-One: у вшитой копии нет своего ключа в preferences.addons
+# (bl_idname обязан совпадать с id расширения) — движок ищем в стандартном
+# пути 3DRedbox, а настройки берём у мастер-аддона.
 _DEFAULT_ENGINE_DIR = os.path.join(os.path.expanduser("~"), "3DRedbox",
                                    "ImageTo3D")
+
+# вшитая копия внутри neuro_character_pipeline (не самостоятельный аддон)
+VENDORED = "neuro_character_pipeline" in (__package__ or "")
 
 def _prefs():
     try:
         return bpy.context.preferences.addons[__package__].preferences
     except Exception:
-        return None
+        pass
+    if VENDORED:
+        # All-in-One: настройки движка живут в мастер-аддоне
+        # (Neuro Character Pipeline -> Preferences -> Engine Folder)
+        try:
+            addons = bpy.context.preferences.addons
+            for k in addons.keys():
+                if k.rsplit(".", 1)[-1] == "neuro_character_pipeline":
+                    return addons[k].preferences
+        except Exception:
+            pass
+    return None
 
 
 def engine_dir():
@@ -3196,7 +3211,9 @@ _OLD_PREFS = {}
 
 
 def register():
-    others = _other_copies()
+    # All-in-One: мастер-аддон сам глушит раздельные копии — миграция
+    # "старый аддон vs расширение" к вшитой копии не относится
+    others = [] if VENDORED else _other_copies()
     if others:
         if __package__.startswith("bl_ext."):
             # the extension wins: turn the old add-on off, so the two do
@@ -3227,7 +3244,8 @@ def register():
     card.register()
     bpy.utils.register_class(IMG3D_OT_clear_cache)
     bpy.utils.register_class(IMG3D_OT_welcome)
-    if not bpy.app.timers.is_registered(_welcome_due):
+    if not VENDORED and not bpy.app.timers.is_registered(_welcome_due):
+        # All-in-One обходится без приветственной карточки Image to 3D
         bpy.app.timers.register(_welcome_due, first_interval=1.5)
     _stats_start()
     try:

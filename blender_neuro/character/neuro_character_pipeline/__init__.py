@@ -9,7 +9,7 @@ N-панель 3D-вьюпорта, категория "Neuro".
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 0, 0),
+    "version": (2, 0, 1),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > Neuro",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -91,22 +91,28 @@ def _fail(context, msg):
 
 # --------------------------------------------------- vendor (All-in-One)
 
-# Раздельные копии движков: конфликтуют с вшитыми (двойная регистрация)
-_LEGACY_KEYS = ("image_to_3d", "xmusclesystem", "xmusclepiemenu")
+# Раздельные копии движков: конфликтуют с вшитыми (двойная регистрация).
+# Матчим по подстроке имени модуля (регистронезависимо): у старых копий
+# ключи могут быть любыми - image_to_3d, "Image_to_3D", bl_ext.*.xmusclesystem...
+_LEGACY_HINTS = ("image_to_3d", "img3d", "xmuscle", "x_muscle", "xpiemenu")
 VENDOR_STATUS = {}   # имя -> "" (ок) или текст ошибки регистрации
 
 
 def _legacy_conflicts():
-    """Включённые раздельные копии Image to 3D / X-Muscle."""
+    """Включённые раздельные копии Image to 3D / X-Muscle / Pie Menu."""
     try:
         keys = list(bpy.context.preferences.addons.keys())
     except Exception:
         return []
+    ours = (__package__ or "neuro_character_pipeline").rsplit(".", 1)[-1]
+    ours = ours.lower()
     out = []
     for k in keys:
-        for base in _LEGACY_KEYS:
-            if k == base or k.endswith("." + base):
-                out.append(k)
+        base = k.rsplit(".", 1)[-1].lower()
+        if base == ours:
+            continue
+        if any(h in base for h in _LEGACY_HINTS):
+            out.append(k)
     return out
 
 
@@ -480,6 +486,49 @@ class NCP_Props(bpy.types.PropertyGroup):
     # --- статус
     state: StringProperty(default="IDLE")
     status: StringProperty(default="")
+
+
+# Ошибки регистрации классов (обычно вторая старая копия аддона):
+# показываются прямо в панели, чтобы "пропавший интерфейс" был видим.
+REGISTER_ERRORS = []
+
+
+def _engine_dir_update(self, context):
+    """Папка движка изменилась - продублировать в json-конфиг вшитого img3d."""
+    try:
+        from .vendor import img3d as _i3d
+        _i3d._save_config()
+    except Exception:
+        pass
+
+
+class NCP_AddonPrefs(bpy.types.AddonPreferences):
+    """Постоянные настройки: не сбрасываются при закрытии Blender
+    (в отличие от настроек на Scene, которые живут только в .blend)."""
+
+    bl_idname = __package__ if __package__ else "neuro_character_pipeline"
+
+    engine_dir: StringProperty(
+        name="Engine & Models Folder", subtype="DIR_PATH", default="",
+        description="Куда вшитый Image to 3D ставит движок и качает AI-"
+                    "модели (около 25 ГБ). Пусто = ~/3DRedbox/ImageTo3D. "
+                    "Это НЕ папка ComfyUI - у движка свой Python-venv",
+        update=_engine_dir_update)
+
+    def draw(self, context):
+        lay = self.layout
+        col = lay.column(align=True)
+        col.prop(self, "engine_dir")
+        row = col.row(align=True)
+        row.operator("img3d.pick_engine_dir", text="Choose Install Folder",
+                     icon="FILE_FOLDER")
+        row.operator("img3d.dl_folder", text="Open Folder",
+                     icon="FOLDER_REDIRECT")
+        col = lay.column(align=True)
+        col.label(text="Здесь лежат движок и модели Image to 3D (~25 ГБ)",
+                  icon="INFO")
+        col.label(text="Папка сохраняется навсегда и переживает "
+                       "переустановку аддона", icon="CHECKMARK")
 
 
 # ----------------------------------------------------------- операторы
@@ -1034,6 +1083,10 @@ class NCP_PT_pipeline(bpy.types.Panel):
     def draw(self, context):
         st = context.scene.ncp
         lay = self.layout
+        for w in REGISTER_ERRORS:
+            row = lay.row()
+            row.alert = True
+            row.label(text=("Вторая копия аддона? " + w)[:90], icon="ERROR")
         for w in _vendor_warnings():
             row = lay.row()
             row.alert = True
@@ -1215,6 +1268,24 @@ class NCP_PT_settings(_NCPSubPanel):
         lay.prop(st, "out_dir")
         lay.prop(st, "comfy_timeout")
         lay.operator("ncp.open_out", icon="FILE_FOLDER")
+        # папка движка и моделей вшитого Image to 3D (хранится в Preferences,
+        # не сбрасывается при закрытии Blender)
+        if ncp_img3d.installed():
+            lay.separator()
+            box = lay.box()
+            box.label(text="Engine & Models Folder", icon="MESH_MONKEY")
+            d = ncp_img3d.engine_dir()
+            if len(d) > 46:
+                d = "..." + d[-43:]
+            box.label(text=d or "~/3DRedbox/ImageTo3D (по умолчанию)",
+                      icon="FILE_FOLDER")
+            row = box.row(align=True)
+            row.operator("img3d.pick_engine_dir", text="Choose Folder",
+                         icon="FILE_FOLDER")
+            row.operator("img3d.dl_folder", text="Open",
+                         icon="FOLDER_REDIRECT")
+            _hint(box, "Движок + модели (~25 ГБ), не папка ComfyUI; "
+                       "хранится в Preferences аддона")
         _hint(lay, "Подробности и схематика — INSTALL_RU.txt рядом с аддоном")
 
 
@@ -1222,6 +1293,7 @@ class NCP_PT_settings(_NCPSubPanel):
 
 classes = (
     NCP_Props,
+    NCP_AddonPrefs,
     NCP_OT_new_sketch,
     NCP_OT_open_sketch,
     NCP_OT_refine_sketch,
@@ -1250,11 +1322,27 @@ classes = (
 
 
 def register():
+    del REGISTER_ERRORS[:]
     for c in classes:
-        bpy.utils.register_class(c)
-    bpy.types.Scene.ncp = PointerProperty(type=NCP_Props)
+        try:
+            bpy.utils.register_class(c)
+        except Exception as e:
+            # одна упавшая класс-регистрация больше не хоронит весь аддон:
+            # обычно это вторая копия с теми же bl_idname - интерфейс
+            # всё равно соберётся из того, что смогло
+            REGISTER_ERRORS.append("%s: %s" % (c.__name__, e))
+    try:
+        bpy.types.Scene.ncp = PointerProperty(type=NCP_Props)
+    except Exception as e:
+        REGISTER_ERRORS.append("Scene.ncp: %s" % e)
     _disable_legacy()
     _register_vendor()
+    if REGISTER_ERRORS:
+        print("[Neuro Pipeline] часть классов не поднялась (обычно виновата "
+              "вторая копия аддона - перезапустите Blender после удаления "
+              "старых копий):")
+        for x in REGISTER_ERRORS:
+            print("   -", x)
 
 
 def unregister():
@@ -1262,9 +1350,15 @@ def unregister():
         bpy.app.timers.unregister(_tick)
     JOB.update(active=False, phase="", next="")
     _unregister_vendor()
-    del bpy.types.Scene.ncp
+    try:
+        del bpy.types.Scene.ncp
+    except Exception:
+        pass
     for c in reversed(classes):
-        bpy.utils.unregister_class(c)
+        try:
+            bpy.utils.unregister_class(c)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -34,6 +34,15 @@ def installed():
     return resolve() is not None
 
 
+def engine_dir():
+    """Папка движка и моделей (настройки мастер-аддона или дефолт)."""
+    mod = resolve()
+    try:
+        return mod.engine_dir() or ""
+    except Exception:
+        return ""
+
+
 def scene_ready():
     return hasattr(bpy.context.scene, "img3d")
 
