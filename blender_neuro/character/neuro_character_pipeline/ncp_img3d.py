@@ -1,17 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-neuro_character_pipeline.ncp_img3d — мост к аддону Image to 3D (image_to_3d).
+neuro_character_pipeline.ncp_img3d — мост к Image to 3D (img3d).
+
+All-in-One: сперва используется вшитая копия vendor.img3d; если по какой-то
+причине она не поднялась — раздельный аддон (legacy или bl_ext.*).
 
 Аддон сам держит сервер-подпроцесс и импортирует результат (GLB).
 Мы: резолвим его модуль, проверяем готовность, выставляем его scene-пропсы,
 запускаем bpy.ops.img3d.generate() и потом ловим появившиеся меши.
 """
 import bpy
+import importlib
 import sys
 
 
 def resolve():
-    """Модуль image_to_3d (legacy или bl_ext.*), None если не включён."""
+    """Модуль Image to 3D: вшитая копия либо раздельный аддон."""
+    try:
+        return importlib.import_module(".vendor.img3d", __package__)
+    except Exception:
+        pass
     try:
         prefs = bpy.context.preferences.addons
     except Exception:

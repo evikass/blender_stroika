@@ -8,6 +8,7 @@ neuro_character_pipeline.ncp_muscles — мост к X-Muscle System.
 пришиваем их к коже (apply_musculature).
 """
 import bpy
+import importlib
 import sys
 
 
@@ -36,8 +37,13 @@ _STYLE_OP = {
 
 
 def resolve():
-    """Модуль X-Muscle System: обычный аддон или расширение bl_ext.*.
-    Не путаем с X-Muscle Pie Menu (в его ключе тоже есть 'xmuscle')."""
+    """Модуль X-Muscle System: сперва вшитая копия (vendor.xmuscle),
+    затем раздельный аддон (обычный или bl_ext.*). Не путаем с
+    X-Muscle Pie Menu (в его ключе тоже есть 'xmuscle')."""
+    try:
+        return importlib.import_module(".vendor.xmuscle", __package__)
+    except Exception:
+        pass
     try:
         keys = list(bpy.context.preferences.addons.keys())
     except Exception:

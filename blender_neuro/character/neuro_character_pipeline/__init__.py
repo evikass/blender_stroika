@@ -9,14 +9,16 @@ N-панель 3D-вьюпорта, категория "Neuro".
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (1, 1, 1),
+    "version": (2, 0, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > Neuro",
-    "description": "Картинка -> 3D-меш -> neuro-скелет -> мышцы -> анимация",
+    "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
+                   "мышцы -> анимация (движки вшиты)",
     "category": "Rigging",
 }
 
 import json
+import importlib
 import os
 import subprocess
 import sys
@@ -85,6 +87,73 @@ def _fail(context, msg):
     st = _st(context)
     st.state = "ERROR"
     st.status = msg
+
+
+# --------------------------------------------------- vendor (All-in-One)
+
+# Раздельные копии движков: конфликтуют с вшитыми (двойная регистрация)
+_LEGACY_KEYS = ("image_to_3d", "xmusclesystem", "xmusclepiemenu")
+VENDOR_STATUS = {}   # имя -> "" (ок) или текст ошибки регистрации
+
+
+def _legacy_conflicts():
+    """Включённые раздельные копии Image to 3D / X-Muscle."""
+    try:
+        keys = list(bpy.context.preferences.addons.keys())
+    except Exception:
+        return []
+    out = []
+    for k in keys:
+        for base in _LEGACY_KEYS:
+            if k == base or k.endswith("." + base):
+                out.append(k)
+    return out
+
+
+def _disable_legacy():
+    """All-in-One сам глушит старые раздельные копии при включении."""
+    import addon_utils
+    for k in _legacy_conflicts():
+        try:
+            addon_utils.disable(k, default_set=True)
+            print("[Neuro Pipeline] старая копия отключена:", k)
+        except Exception as exc:
+            print("[Neuro Pipeline] не удалось отключить", k, ":", exc)
+
+
+def _register_vendor():
+    """Поднять вшитые движки (img3d, xmuscle, xpiemenu)."""
+    VENDOR_STATUS.clear()
+    for name in ("img3d", "xmuscle", "xpiemenu"):
+        try:
+            mod = importlib.import_module(".vendor." + name, __package__)
+            mod.register()
+            VENDOR_STATUS[name] = ""
+        except Exception as e:
+            VENDOR_STATUS[name] = "%s: %s" % (type(e).__name__, e)
+            print("[Neuro Pipeline] vendor.%s не поднялся: %s" % (name, e))
+
+
+def _unregister_vendor():
+    for name in ("xpiemenu", "xmuscle", "img3d"):
+        try:
+            mod = importlib.import_module(".vendor." + name, __package__)
+            mod.unregister()
+        except Exception:
+            pass
+
+
+def _vendor_warnings():
+    """Строки для карточки: конфликты/ошибки вшитых движков."""
+    out = []
+    legacy = _legacy_conflicts()
+    if legacy:
+        out.append("Отключите старые раздельные аддоны: "
+                   + ", ".join(legacy))
+    for name, err in VENDOR_STATUS.items():
+        if err:
+            out.append("Вшитый %s не поднялся: %s" % (name, err))
+    return out
 
 
 def _start_timer():
@@ -965,6 +1034,10 @@ class NCP_PT_pipeline(bpy.types.Panel):
     def draw(self, context):
         st = context.scene.ncp
         lay = self.layout
+        for w in _vendor_warnings():
+            row = lay.row()
+            row.alert = True
+            row.label(text=w, icon="ERROR")
         _status_card(lay, context, st)
         _big(lay, "ncp.run_all", "FULL CYCLE", icon="PLAY")
         _hint(lay, "Всё одной кнопкой: картинка -> меш -> скелет -> мышцы")
@@ -1180,12 +1253,15 @@ def register():
     for c in classes:
         bpy.utils.register_class(c)
     bpy.types.Scene.ncp = PointerProperty(type=NCP_Props)
+    _disable_legacy()
+    _register_vendor()
 
 
 def unregister():
     if bpy.app.timers.is_registered(_tick):
         bpy.app.timers.unregister(_tick)
     JOB.update(active=False, phase="", next="")
+    _unregister_vendor()
     del bpy.types.Scene.ncp
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
