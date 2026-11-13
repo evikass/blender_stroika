@@ -11,7 +11,7 @@ URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слета
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 2, 0),
+    "version": (2, 3, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -39,11 +39,13 @@ if "ncp_comfy" in locals():  # reload при правках в текст-ред
     importlib.reload(ncp_img3d)
     importlib.reload(ncp_muscles)
     importlib.reload(neuro_rig)
+    importlib.reload(neuro_autorig)
 else:
     from . import ncp_comfy
     from . import ncp_img3d
     from . import ncp_muscles
     from . import neuro_rig
+    from . import neuro_autorig
 
 
 # ------------------------------------------------------------ состояние
@@ -251,6 +253,9 @@ def _find_skin_mesh(context):
 
 def _clear_old_rig():
     old = bpy.data.objects.get("NeuroCharacter")
+    for o in list(bpy.data.objects):
+        if o.name.startswith("ncp_lm_"):
+            bpy.data.objects.remove(o)          # старые landmarks-маркеры
     if old is None:
         return
     for o in list(bpy.data.objects):
@@ -280,6 +285,12 @@ def _build_rig(context, mesh):
     if st.orient_auto:
         rot_x, rot_z = neuro_rig.guess_orientation(mesh)
         st.mesh_rot_x, st.mesh_rot_z = rot_x, rot_z
+    if st.auto_rig:
+        try:
+            return _build_rig_fitted(context, mesh, spec, rot_x, rot_z)
+        except neuro_autorig.RigFitError as e:
+            st.status = ("Auto-Rig не удался (%s) — включён старый режим: "
+                         "меш масштабируется под скелет 1.70 м" % e)
     arm = neuro_rig.build_armature(spec, name="NeuroCharacter")
     if st.add_fingers:
         neuro_rig.add_finger_chains(arm)
@@ -291,6 +302,33 @@ def _build_rig(context, mesh):
         _st(context).status = ("Меш повёрнут (авто): X%+g°, Z%+g° — "
                                "если смотрит назад, поставьте rot Z = -90"
                                % (rot_x, rot_z))
+    return arm
+
+
+def _build_rig_fitted(context, mesh, spec, rot_x, rot_z):
+    """Auto-Rig в стиле Hyper3D: скелет подгоняется под тело.
+
+    Меш поворачивается (авто-ориентация) и ставится низом в z=0,
+    размер НЕ меняется. По вершинам ищутся точки тела, из них
+    собирается та же 18-костная спека (контракт human.json), арматура
+    строится по ней, меш скинится как есть. При неудаче кидается
+    RigFitError — вызывающий код откатывается на старый режим."""
+    st = _st(context)
+    neuro_autorig.place_mesh(mesh, rot_x_deg=rot_x, rot_z_deg=rot_z,
+                             do_apply=st.apply_transforms)
+    pts = neuro_autorig.mesh_world_points(mesh)
+    fitted, lm, info = neuro_autorig.fit_spec_to_mesh(spec, pts)
+    arm = neuro_rig.build_armature(fitted, name="NeuroCharacter")
+    arm["ncp_height"] = float(lm["height"])
+    if st.add_fingers:
+        neuro_rig.add_finger_chains(arm, scale=lm["height"] / 1.70)
+    neuro_rig.skin_mesh_to_armature(mesh, arm)
+    if st.debug_landmarks:
+        neuro_autorig.make_debug_empties(lm)
+    note = ("; смотрит назад — rot Z = -90"
+            if st.orient_auto and (abs(rot_x) > 1e-6 or abs(rot_z) > 1e-6)
+            else "")
+    st.status = info + note
     return arm
 
 
@@ -520,6 +558,18 @@ class NCP_Props(bpy.types.PropertyGroup):
         name="Apply transforms", default=True,
         description="Запечь масштаб/поворот меша перед скинингом "
                     "(рекомендуется)")
+    auto_rig: BoolProperty(
+        name="Auto-Rig (как в Hyper3D)", default=True,
+        description="Скелет подгоняется под тело: по геометрии меша "
+                    "находятся промежность, колени, плечи, локти, шея — "
+                    "и кости ставятся туда. Меш остаётся в своих "
+                    "пропорциях. Выключить = старый режим (меш "
+                    "масштабируется под скелет 1.70 м)")
+    debug_landmarks: BoolProperty(
+        name="Show landmarks", default=False,
+        description="Создать пустышки-маркеры в найденных точках тела "
+                    "(промежность, плечи, локти, шея...) — для контроля "
+                    "подгонки скелета")
     replace_existing: BoolProperty(
         name="Replace skeleton", default=True,
         description="Удалить старый NeuroCharacter и пересоздать")
@@ -1508,13 +1558,17 @@ class NCP_PT_rig(_NCPSubPanel):
         row.prop(st, "mesh_rot_z")
         row = lay.row(align=True)
         row.prop(st, "orient_auto")
+        row.prop(st, "auto_rig", text="Auto-Rig")
+        row = lay.row(align=True)
         row.prop(st, "add_fingers")
+        row.prop(st, "debug_landmarks", text="Landmarks")
         row = lay.row(align=True)
         row.prop(st, "replace_existing", text="Replace")
         row.prop(st, "apply_transforms", text="Apply")
-        _hint(lay, "18 neuro-костей (RL-контракт human.json), "
-                   "меш подгонится и повернётся сам; пальцы — опция "
-                   "для позирования")
+        _hint(lay, "Auto-Rig (вкл. по умолчанию): скелет подгоняется "
+                   "под тело — промежность, плечи, колени ищутся по "
+                   "геометрии меша, пропорции персонажа сохраняются. "
+                   "Выключить = меш масштабируется под скелет 1.70 м")
 
 
 class NCP_PT_muscles(_NCPSubPanel):

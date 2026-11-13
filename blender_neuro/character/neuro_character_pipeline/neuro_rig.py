@@ -208,15 +208,39 @@ def apply_animation(arm_obj, spec, frames, fps=48.0, frame_step=1):
 
 
 def apply_motion_to_armature(arm_obj, payload, frame_step=1):
-    """Neuro motion JSON -> готовая арматура. Возвращает (n_frames, fps)."""
+    """Neuro motion JSON -> готовая арматура. Возвращает (n_frames, fps).
+    Если арматура подогнана под тело (Auto-Rig, custom prop ncp_height),
+    движение ретаргетится по высоте: корень масштабируется
+    fitted_height / высота спеки из JSON (кадры двигаются вместе с
+    персонажем, ноги не проваливаются/не висят)."""
     spec = payload["spec"]
     frames = payload["frames"]
     fps = float(payload.get("fps", 48.0))
     step = max(1, int(frame_step))
     if step > 1:
         frames = frames[::step]
+    try:
+        fitted_h = float(arm_obj.get("ncp_height", 0.0) or 0.0)
+    except Exception:
+        fitted_h = 0.0
+    if fitted_h > 0.01:
+        base_h = spec_height(spec)
+        if base_h > 0.01:
+            frames = scale_frames_root(frames, fitted_h / base_h)
     apply_animation(arm_obj, spec, frames, fps=fps / step, frame_step=1)
     return len(frames), fps / step
+
+
+def scale_frames_root(frames, k):
+    """Масштаб корневой траектории кадров (ретаргет по росту)."""
+    if abs(k - 1.0) < 1e-6:
+        return frames
+    out = []
+    for fr in frames:
+        fr2 = dict(fr)
+        fr2["root_pos"] = [c * k for c in fr["root_pos"]]
+        out.append(fr2)
+    return out
 
 
 # -------------------------------------------------------- меш и скининг
@@ -316,10 +340,11 @@ def finger_bone_names():
     return out
 
 
-def add_finger_chains(arm_obj):
+def add_finger_chains(arm_obj, scale=1.0):
     """По 10 костей пальцев от концов предплечий farm_L/farm_R.
     neuro-анимация (apply_animation) ведёт только кости спеки, пальцы
-    просто едут вместе с рукой — на контракт нейросима не влияют."""
+    просто едут вместе с рукой — на контракт нейросима не влияют.
+    scale — множитель размеров (рост персонажа / 1.70 м)."""
     arm_data = arm_obj.data
     try:
         bpy.ops.object.mode_set(mode="OBJECT")
@@ -332,16 +357,17 @@ def add_finger_chains(arm_obj):
         eb_p = arm_data.edit_bones.get(par)
         if eb_p is None:
             continue
-        base = eb_p.tail + eb_p.vector * (eb_p.length + 0.07)
+        base = eb_p.tail + eb_p.vector * (eb_p.length + 0.07 * scale)
         for fname, off_z, ln in FINGER_PLAN:
-            head = base + Vector((0.0, 0.0, off_z))
+            head = base + Vector((0.0, 0.0, off_z * scale))
             parent = eb_p
             for seg in (1, 2):
                 eb = arm_data.edit_bones.new(
                     "fng_%s_%d_%s" % (fname, seg, side))
                 eb.head = head
-                eb.tail = head + eb_p.vector * (ln * (0.55 if seg == 1
-                                                     else 0.45))
+                eb.tail = head + eb_p.vector * (ln * scale *
+                                                (0.55 if seg == 1
+                                                 else 0.45))
                 eb.roll = 0.0
                 eb.parent = parent
                 head = eb.tail
