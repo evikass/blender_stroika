@@ -11,7 +11,7 @@ URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слета
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 3, 0),
+    "version": (2, 3, 1),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -289,8 +289,14 @@ def _build_rig(context, mesh):
         try:
             return _build_rig_fitted(context, mesh, spec, rot_x, rot_z)
         except neuro_autorig.RigFitError as e:
-            st.status = ("Auto-Rig не удался (%s) — включён старый режим: "
-                         "меш масштабируется под скелет 1.70 м" % e)
+            reason = "Auto-Rig не удался (%s)" % e
+        except Exception as e:                       # не роняем риг целиком
+            reason = ("Auto-Rig упал с ошибкой (%s: %s)"
+                      % (type(e).__name__, e))
+        st.status = (reason + " — включён старый режим: "
+                     "меш масштабируется под скелет 1.70 м")
+        _clear_old_rig()          # не оставлять полупостроенный риг
+        rot_x, rot_z = 0.0, 0.0   # place_mesh уже повернул и поставил меш
     arm = neuro_rig.build_armature(spec, name="NeuroCharacter")
     if st.add_fingers:
         neuro_rig.add_finger_chains(arm)

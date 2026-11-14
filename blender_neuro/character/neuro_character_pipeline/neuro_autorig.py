@@ -32,12 +32,13 @@ ROOT = "pelvis"
 # ------------------------------------------------------------- точки меша
 
 def mesh_world_points(mesh_obj):
-    """(N,3) мировые координаты вершин меша (numpy)."""
+    """(N,3) мировые координаты вершин меша (numpy).
+
+    ВАЖНО: локальный import numpy внутри функции делать нельзя — он
+    делает np локальной переменной всей функции, и проверка np is None
+    выше падает UnboundLocalError ещё до импорта. numpy импортируется
+    один раз на уровне модуля (в Blender он есть всегда)."""
     if np is None:
-        raise RigFitError("numpy недоступен")
-    try:
-        import numpy as np
-    except ImportError:
         raise RigFitError("numpy недоступен")
     me = mesh_obj.data
     n = len(me.vertices)
