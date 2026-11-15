@@ -84,27 +84,48 @@ def _slice_z(sl, z0, h):
 
 
 def _leg_split(sl, yc, gap):
-    """Разделены ли ноги на этом срезе: пустой центральный зазор.
+    """Разделены ли ноги на этом срезе: в центральной полосе ищем
+    самый пустой зазор (долину плотности).
 
-    Плотностной тест: плотность точек в полосе |y| < gap должна быть
-    намного ниже плотности по бокам (у ног между ними пусто, а торс
-    с прижатыми руками заполняет центр). Возвращает (y_left, y_right)
-    центроиды кластеров или None.
+    Старый тест «полоса |y| < gap пуста» ломался на толстых бёдрах:
+    внутренние края труб дают пики плотности у центра (касательные
+    к поверхности), и срез раздельных ног выглядел «заполненным в
+    середине». Теперь: сглаженная гистограмма полосы |y| < 2.5*gap,
+    минимум у центра — долина; она обязана быть < 22% плотности ног
+    по бокам. Возвращает (y_left, y_right) центроиды ног или None.
     """
     if sl is None:
         return None
     y = sl["ys"] - yc
-    mid = np.abs(y) < gap
-    left = y > gap
-    right = y < -gap
-    if left.sum() < 0.15 * sl["n"] or right.sum() < 0.15 * sl["n"]:
+    n = int(len(y))
+    if n < 12:
         return None
-    mid_rate = mid.sum() / (2.0 * gap)
-    left_rate = left.sum() / max(float(y[left].max()) - gap, 1e-6)
-    right_rate = right.sum() / max(gap - float(y[right].min()), 1e-6)
-    if mid_rate < 0.25 * min(left_rate, right_rate):
-        return (float(y[left].mean()), float(y[right].mean()))
-    return None
+    lo, hi = -2.5 * gap, 2.5 * gap
+    sel = y[np.abs(y) < hi]
+    if len(sel) < 10:
+        return None
+    nb = 20
+    hist = np.histogram(sel, bins=nb, range=(lo, hi))[0].astype(float)
+    ker = np.array([1.0, 2.0, 3.0, 2.0, 1.0])
+    sm = np.convolve(hist, ker / ker.sum(), mode="same")
+    mid = nb // 2
+    win = 4
+    v_off = int(np.argmin(sm[mid - win:mid + win + 1]))
+    v_i = mid - win + v_off
+    v_y = lo + (v_i + 0.5) * (hi - lo) / nb
+    valley = float(sm[v_i])
+    l_lo, l_hi = max(0, v_i - win - 4), max(1, v_i - 2)
+    r_lo, r_hi = v_i + 3, min(nb, v_i + win + 5)
+    left = float(sm[l_lo:l_hi].max()) if l_hi > l_lo else 0.0
+    right = float(sm[r_lo:r_hi].max()) if r_hi > r_lo else 0.0
+    sides = min(left, right)
+    if sides <= 0 or valley > 0.22 * sides:
+        return None
+    yl = y[y > v_y]
+    yr = y[y < v_y]
+    if len(yl) < 0.12 * n or len(yr) < 0.12 * n:
+        return None
+    return (float(yl.mean()), float(yr.mean()))
 
 
 def _cluster_y(sl, side, yc, min_y=0.01):

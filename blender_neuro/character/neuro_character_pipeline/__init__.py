@@ -11,7 +11,7 @@ URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слета
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 4, 0),
+    "version": (2, 5, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -358,9 +358,14 @@ def _build_rig_auto(context, mesh, spec, rot_x, rot_z):
     neuro_rig.skin_mesh_to_armature(mesh, arm)
     if st.debug_landmarks:
         neuro_creature.make_landmarks(res["joints"], res["h"])
-    note = ("; если смотрит назад — rot Z = 180 и Build Skeleton снова"
-            if res["plan"] != "human" and st.orient_auto and
-            abs(rot_x) > 1e-6 else "")
+    note = ""
+    if st.orient_auto:
+        if abs(rot_x) > 1e-6:
+            note += "; меш поднят из лежачего положения (rot X %+g)" % rot_x
+        if abs(rot_z) > 1e-6:
+            note += ("; довернут лицом к +X (rot Z %+g, нужно "
+                     "нейроанимации); смотрит назад — rot Z 180 и "
+                     "Build Skeleton снова" % rot_z)
     st.status = res["report"] + note
     return arm
 
@@ -632,11 +637,12 @@ class NCP_Props(bpy.types.PropertyGroup):
         name="Replace skeleton", default=True,
         description="Удалить старый NeuroCharacter и пересоздать")
     add_fingers: BoolProperty(
-        name="Add fingers", default=False,
-        description="Добавить 20 костей пальцев (10 на руку) поверх "
-                    "18 neuro-костей — для позирования/экспорта. "
-                    "neurosim анимирует только 18 основных костей, "
-                    "пальцы едут вместе с рукой")
+        name="Add fingers", default=True,
+        description="Добавить кости пальцев: рука — 10 костей (5 "
+                    "пальцев) поверх neuro-скелета; для creature-планов "
+                    "пальцы ищутся по геометрии кисти/лапы. neurosim "
+                    "анимирует только основные кости, пальцы едут "
+                    "вместе с рукой")
     # --- шаг 5: мышцы
     muscle_style: EnumProperty(
         name="Style",
@@ -1426,6 +1432,28 @@ def _big(lay, op_id, text, icon=None):
     return row.operator(op_id, text=text, icon=icon)
 
 
+def _wrap_rows(text, width=58, max_rows=9):
+    """Разбить текст на строки без обрезки середины: Blender label
+    длинный текст НЕ переносит, а глушит '...' по центру — именно
+    поэтому пользователь не видел причину падения Auto-Rig."""
+    words = str(text).split()
+    rows, cur = [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width:
+            rows.append(cur)
+            cur = w
+        else:
+            cur = (cur + " " + w).strip()
+    if cur:
+        rows.append(cur)
+    if len(rows) > max_rows:              # хвост — без потери начала
+        head = rows[:max_rows - 1]
+        tail = " ".join(rows[max_rows - 1:])
+        head.append(tail[:width - 3] + "...")
+        rows = head
+    return rows or [""]
+
+
 def _status_card(lay, context, st):
     box = lay.box()
     row = box.row(align=True)
@@ -1444,11 +1472,12 @@ def _status_card(lay, context, st):
     if JOB["active"]:
         row.operator("ncp.cancel", text="", icon="X")
     if st.status:
-        srow = box.row()
-        srow.scale_y = 0.8
-        if st.state == "ERROR":
-            srow.alert = True
-        srow.label(text=st.status[:100])
+        for chunk in _wrap_rows(st.status):
+            srow = box.row()
+            srow.scale_y = 0.8
+            if st.state == "ERROR":
+                srow.alert = True
+            srow.label(text=chunk)
     # трекер: 6 шагов, иконки состояния + подписи
     flags = _step_flags(context, st)
     states = _tracker_states(flags, JOB["phase"])
@@ -1624,29 +1653,27 @@ class NCP_PT_rig(_NCPSubPanel):
     def _content(self, context):
         st = context.scene.ncp
         lay = self.layout
-        lay.prop(st, "spec_path")
+        lay.prop(st, "spec_path", text="Spec JSON")
         _big(lay, "ncp.build_skeleton", "Build Skeleton",
              icon="ARMATURE_DATA")
-        row = lay.row(align=True)
-        row.prop(st, "mesh_rot_x")
-        row.prop(st, "mesh_rot_z")
+        col = lay.column(align=True)
+        col.prop(st, "mesh_rot_x", text="Rot X (лежит)")
+        col.prop(st, "mesh_rot_z", text="Rot Z (взгляд)")
         row = lay.row(align=True)
         row.prop(st, "orient_auto")
         row.prop(st, "auto_rig", text="Auto-Rig")
-        lay.prop(st, "body_plan")
+        lay.prop(st, "body_plan", text="Plan")
         row = lay.row(align=True)
         row.prop(st, "add_fingers")
         row.prop(st, "debug_landmarks", text="Landmarks")
         row = lay.row(align=True)
         row.prop(st, "replace_existing", text="Replace")
         row.prop(st, "apply_transforms", text="Apply")
-        _hint(lay, "Auto-Rig (вкл. по умолчанию): скелет подгоняется "
-                   "под тело ЛЮБОГО плана — аддон сам считает ноги, "
-                   "находит руки/крылья/хвост/шею и пальцы по "
-                   "геометрии. Body plan = Auto; если план известен "
-                   "— задайте его явно. Человек получает контракт 18 "
-                   "костей (мышцы/анимация работают), прочие — "
-                   "универсальный скелет по существу")
+        _hint(lay, "Auto-Rig подгоняет скелет под тело любого плана: "
+                   "считает ноги, находит руки/крылья/хвост/шею и "
+                   "пальцы по геометрии. Меш довернётся лицом к +X "
+                   "(нужно нейроанимации). Смотрит назад — Rot Z 180 "
+                   "и Build Skeleton снова")
 
 
 class NCP_PT_muscles(_NCPSubPanel):

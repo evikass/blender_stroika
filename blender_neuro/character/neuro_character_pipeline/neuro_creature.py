@@ -213,16 +213,59 @@ def orient_stand(mesh):
     return 90.0 if ez <= min(ex, ey) else 0.0
 
 
-def face_rotation(pts):
-    """Стадия 2: rot Z, чтобы продольная ось тела смотрела в +X.
+def _facing_offset(pts, z0, h):
+    """Куда смотрит существо: сдвиг центроидов стоп от голеней.
 
-    Ноги считаются у земли: 2 — двуногий (развиваем ГЛУБИНУ к X),
-    4+ — четвероногий/многоногий (развиваем ДЛИНУ к X, знаком по тому,
-    где голова: верхняя четверть массы).
-    """
+    Носки/пальцы лап выдаются вперёд от оси ноги — средний (по массе)
+    вектор «стопа минус голень» показывает лицо. Возвращает (fx, fy)
+    или None, если стопы не читаются (не существо/нет стоп)."""
+    foot = pts[(pts[:, 2] >= z0 + 0.015 * h) &
+               (pts[:, 2] <= z0 + 0.055 * h)]
+    leg = pts[(pts[:, 2] > z0 + 0.06 * h) &
+              (pts[:, 2] <= z0 + 0.11 * h)]
+    if len(foot) < 20 or len(leg) < 20:
+        return None
+    cf = _clusters(foot[:, :2], 0.018 * h,
+                   max(6, int(0.004 * len(foot))))
+    cl = _clusters(leg[:, :2], 0.018 * h,
+                   max(6, int(0.004 * len(leg))))
+    if not cf or not cl:
+        return None
+    sx = sy = w = 0.0
+    for f in cf[:8]:
+        best, bd = None, None
+        for l in cl[:8]:
+            dd = ((l["c"][0] - f["c"][0]) ** 2 +
+                  (l["c"][1] - f["c"][1]) ** 2)
+            if bd is None or dd < bd:
+                best, bd = l, dd
+        if best is None or bd > (0.12 * h) ** 2:
+            continue
+        sx += (f["c"][0] - best["c"][0]) * f["n"]
+        sy += (f["c"][1] - best["c"][1]) * f["n"]
+        w += f["n"]
+    if w <= 0:
+        return None
+    fx, fy = sx / w, sy / w
+    if math.hypot(fx, fy) < 0.012 * h:
+        return None
+    return fx, fy
+
+
+def face_rotation(pts):
+    """Стадия 2: rot Z, чтобы лицо смотрело в +X.
+
+    Основной способ — по носкам/пальцам лап (они торчат вперёд):
+    знак поворота становится правильным в обоих направлениях
+    (v2.4.0 у двуногих крутил вслепую на +90 — персонаж мог встать
+    лицом назад). Запасной путь — старая эвристика по числу ног и
+    глубине/длине корпуса."""
     z0 = float(pts[:, 2].min())
     z1 = float(pts[:, 2].max())
     h = z1 - z0
+    fac = _facing_offset(pts, z0, h)
+    if fac is not None:
+        return math.degrees(math.atan2(-fac[1], fac[0]))
     band = pts[(pts[:, 2] >= z0 + 0.04 * h) &
                (pts[:, 2] <= z0 + 0.08 * h)]
     n_legs = 0
@@ -318,11 +361,28 @@ def _leg_paths(pts, z0, h, yc):
         else:
             toe = ankle + np.array([0.5 * r, 0.0, 0.0])
         legs.append({
-            "side": +1 if c["c"][1] >= yc else -1,
             "r": float(r), "path": [tuple(p) for p in P],
             "ankle": ankle, "hip": hip, "knee": knee, "toe": toe,
             "top_z": float(hip[2]),
         })
+    return legs
+
+
+def _assign_sides(legs, yc):
+    """Стороны L/R по плоскости y = yc.
+
+    Если плоскость симметрии сползла и ВСЕ ноги легли по одну
+    сторону — делим по самим ногам (медиана y): иначе у пары ног
+    будут одинаковые суффиксы и имена костей задвоятся
+    ( CreatureError «дубликаты имён: ['leg_L_upper']» в v2.4.0 )."""
+    if not legs:
+        return legs
+    ys = [float(l["hip"][1]) for l in legs]
+    if all(y >= yc for y in ys) or all(y < yc for y in ys):
+        s = sorted(ys)
+        yc = 0.5 * (s[0] + s[-1]) if len(s) == 2 else s[len(s) // 2]
+    for l in legs:
+        l["side"] = +1 if float(l["hip"][1]) >= yc else -1
     return legs
 
 
@@ -397,6 +457,42 @@ def _torso_profile(pts, legs, z0, h):
     return {"path": path, "zs": zs, "top_z": zs[-1], "belly_w": belly_w}
 
 
+def _blob_flatness(P, attach=None):
+    """Плоскость сечения СРЕДНЕЙ части массы: min/max поперечные
+    размахи перпендикулярно главной оси (0..1).
+
+    Мерен средний сегмент (30-70% длины от крепления):
+    у настоящего крыла там перепонка (<0.25), у руки — круглое
+    предплечье (~0.4-0.9). Дисталь брать нельзя — растопыренная
+    кисть плоская, как перепонка (v2.5.0 из-за этого терял руку);
+    корень тоже нельзя — плечо крыла круглое (птица считалась
+    рукой). НЕ зависит от направления конечности: T-pose рука
+    тонка по Z, как крыло, но сечение круглое (v2.4.0 мерил
+    тонкость по Z и превращал T-pose человека в biped_wings —
+    терялись пальцы и human-контракт)."""
+    P = np.asarray(P, dtype=float)
+    d = _cov_axis(P)
+    ctr = P.mean(axis=0)
+    t = (P - ctr) @ d
+    if attach is not None:
+        a = np.asarray(attach, dtype=float)
+        if float(d @ (ctr - a)) < 0:       # d — наружу от крепления
+            d = -d
+            t = -t
+    t_min, t_max = float(t.min()), float(t.max())
+    span = max(t_max - t_min, 1e-9)
+    rel = (t - t_min) / span
+    mid = P[(rel >= 0.30) & (rel <= 0.70)]
+    if len(mid) < 20:
+        mid = P
+    d2 = _cov_axis(mid)
+    u = _perp(d2)
+    v = np.cross(d2, u)
+    a2 = float(np.ptp(mid @ u))
+    b2 = float(np.ptp(mid @ v))
+    return min(a2, b2) / max(a2, b2, 1e-6)
+
+
 def _classify_lateral(blobs, torso, h, yc, n_legs):
     """Латеральные массы -> (arms, wings). Каждая масса — отдельный
     dict (пары не склеиваются: левая и правая строятся независимо)."""
@@ -412,15 +508,16 @@ def _classify_lateral(blobs, torso, h, yc, n_legs):
         main = max(ext)
         # крепление: точка блока ближе всего к плоскости симметрии
         attach = P[int(np.argmin(np.abs(P[:, 1] - yc)))]
-        ratio = ext[2] / max(main, 1e-6)
-        is_wing = (n_legs >= 4) or (ratio < 0.14 and main > 0.35 * h)
+        flat = _blob_flatness(P, attach)
+        # крыло = плоская перепонка; рука = круглое сечение
+        is_wing = (n_legs >= 4) or (flat < 0.25 and main > 0.30 * h)
         zi = min(range(len(torso["zs"])),
                  key=lambda i: abs(torso["zs"][i] - float(attach[2])))
         sx = torso["path"][zi][0]
         if float(attach[0]) < sx - 0.06 * h:   # крепится за спиной
             is_wing = True
         entry = {"c": bl["c"], "P": P, "dir": bl["dir"], "ext": ext,
-                 "n": bl["n"], "attach": attach,
+                 "n": bl["n"], "attach": attach, "flat": flat,
                  "side": +1 if float(bl["c"][1]) >= yc else -1}
         (wings if is_wing else arms).append(entry)
     return arms, wings
@@ -438,9 +535,15 @@ def _one_per_side(entries):
 
 def _limb_chain(P, attach, h):
     """Станции цепочки вдоль главной оси облака P от attach наружу.
-    Возвращает (stations [(point, r)], dir)."""
+    Возвращает (stations [(point, r)], dir).
+
+    Ось разворачивается НАРУЖУ (от крепления к центру масс облака):
+    v2.4.0 разворачивал наоборот (attach - mean), ось смотрела внутрь,
+    t уходил в минус, L = percentile97(t) схлопывался и все 4 станции
+    цепи слипались у плеча — руки/крылья без пальцев и с костями-
+    точками."""
     d = _cov_axis(P)
-    if float(d @ (np.asarray(attach, dtype=float) - P.mean(axis=0))) < 0:
+    if float(d @ (P.mean(axis=0) - np.asarray(attach, dtype=float))) < 0:
         d = -d
     rel = P - np.asarray(attach, dtype=float)
     t = rel @ d
@@ -664,6 +767,7 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
     joints = []
 
     legs = _leg_paths(pts, z0, h, yc)
+    legs = _assign_sides(legs, yc)
     n_legs = len(legs)
     for l in legs:
         joints += [("hip", *l["hip"]), ("knee", *l["knee"]),
@@ -714,14 +818,20 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
         except neuro_autorig.RigFitError:
             lm = None
         if lm is not None and base_spec is not None:
-            fitted = neuro_autorig.build_fitted_spec(base_spec, lm)
-            return {
-                "plan": "human", "spec": fitted,
-                "h": float(lm["height"]),
-                "report": ("План: человек — контракт 18 костей, мышцы "
-                           "и анимация neurosim доступны"),
-                "joints": joints, "notes": notes,
-            }
+            try:
+                fitted = neuro_autorig.build_fitted_spec(base_spec, lm)
+            except neuro_autorig.RigFitError as e:
+                # человек распознан, но контракт не собрался — не валим
+                # весь Auto-Rig: строим универсального двуногого
+                notes.append("human-контракт не собрался (%s)" % e)
+            else:
+                return {
+                    "plan": "human", "spec": fitted,
+                    "h": float(lm["height"]),
+                    "report": ("План: человек — контракт 18 костей, мышцы "
+                               "и анимация neurosim доступны"),
+                    "joints": joints, "notes": notes,
+                }
 
     if plan == "HUMAN":
         raise CreatureError("человек не распознан (план задан "
@@ -856,7 +966,7 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
                         pprev = nm
             elif kind == "arm" and add_fingers and \
                     float(np.linalg.norm(
-                        tip - np.asarray(w["attach"]))) > 0.10 * h:
+                        tip - np.asarray(w["attach"]))) > 0.06 * h:
                 _generic_fingers(out, last_name, tip, d, rds[-1], h,
                                  sfx)
             joints.append((kind, float(tip[0]), float(tip[1]),
