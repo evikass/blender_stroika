@@ -11,7 +11,7 @@ URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слета
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 5, 0),
+    "version": (2, 6, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -363,9 +363,8 @@ def _build_rig_auto(context, mesh, spec, rot_x, rot_z):
         if abs(rot_x) > 1e-6:
             note += "; меш поднят из лежачего положения (rot X %+g)" % rot_x
         if abs(rot_z) > 1e-6:
-            note += ("; довернут лицом к +X (rot Z %+g, нужно "
-                     "нейроанимации); смотрит назад — rot Z 180 и "
-                     "Build Skeleton снова" % rot_z)
+            note += ("; довернут лицом к +X (rot Z %+g — для "
+                     "нейроанимации)" % rot_z)
     st.status = res["report"] + note
     return arm
 
@@ -585,13 +584,16 @@ class NCP_Props(bpy.types.PropertyGroup):
                     "лежит/стоит не так")
     orient_auto: BoolProperty(
         name="Auto-orient", default=True,
-        description="Определить по bbox: лежит ли меш и куда смотрит; "
-                    "найденные углы запишутся в Mesh rot X/Z")
+        description="Поставить меш сам: подъём из лежачего положения + "
+                    "доворот лицом к +X по зеркальной симметрии тела "
+                    "(носки/голова); углы запишутся в Mesh rot X/Z")
     mesh_rot_z: FloatProperty(
         name="Mesh rot Z", default=0.0, min=-180.0, max=180.0,
-        description="Доворот меша вокруг Z (куда смотрит персонаж). "
-                    "0 = смотрит +X, как neuro-скелет; если после "
-                    "авто-определения смотрит назад — поставьте -90")
+        description="Ручной доворот меша вокруг Z (куда смотрит "
+                    "персонаж). Используется при выключенном Auto-orient; "
+                    "0 = смотрит +X, как neuro-скелет. Auto-Rig строит "
+                    "скелет по факту ориентации — ошибиться поворотом "
+                    "нельзя")
     apply_transforms: BoolProperty(
         name="Apply transforms", default=True,
         description="Запечь масштаб/поворот меша перед скинингом "
@@ -1669,11 +1671,11 @@ class NCP_PT_rig(_NCPSubPanel):
         row = lay.row(align=True)
         row.prop(st, "replace_existing", text="Replace")
         row.prop(st, "apply_transforms", text="Apply")
-        _hint(lay, "Auto-Rig подгоняет скелет под тело любого плана: "
-                   "считает ноги, находит руки/крылья/хвост/шею и "
-                   "пальцы по геометрии. Меш довернётся лицом к +X "
-                   "(нужно нейроанимации). Смотрит назад — Rot Z 180 "
-                   "и Build Skeleton снова")
+        _hint(lay, "Auto-Rig подгоняет скелет под тело: считает ноги, "
+                   "руки/крылья/хвост/шею и пальцы по геометрии. "
+                   "Ориентация — авто по зеркальной симметрии: носки и "
+                   "конечности строятся по факту тела, меш довернётся "
+                   "лицом к +X (нужно нейроанимации)")
 
 
 class NCP_PT_muscles(_NCPSubPanel):

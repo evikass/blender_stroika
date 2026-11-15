@@ -42,7 +42,30 @@ class CreatureError(RuntimeError):
 NBINS = 200
 
 
-# ------------------------------------------------------------ утилиты
+# ------------------------------------------------------------- утилиты
+
+def _capsule_pts(a, b, r, n, seed=11):
+    """Случайные точки внутри капсулы (для синтетических рук-страховок)."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    d = b - a
+    L = float(np.linalg.norm(d))
+    if L < 1e-9:
+        return np.tile(a, (n, 1))
+    u = d / L
+    ref = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else \
+        np.array([0.0, 1.0, 0.0])
+    e1 = np.cross(u, ref)
+    e1 /= max(float(np.linalg.norm(e1)), 1e-9)
+    e2 = np.cross(u, e1)
+    rng = np.random.default_rng(seed)
+    t = rng.uniform(0.0, L, n)
+    ang = rng.uniform(0.0, 2.0 * np.pi, n)
+    rad = r * np.sqrt(rng.uniform(0.0, 1.0, n))
+    return (a + u * t[:, None] +
+            (e1 * np.cos(ang)[:, None] + e2 * np.sin(ang)[:, None]) *
+            rad[:, None])
+
 
 def _clusters(pts_xy, cell, min_pts):
     """2D-кластеры (flood fill по сетке, 8-связность).
@@ -154,6 +177,189 @@ def _sym_yc(pts):
     return best_c
 
 
+def _rotz(pts, deg):
+    """Повернуть точки (N,3) вокруг вертикали Z на deg градусов."""
+    a = math.radians(deg)
+    c, s = math.cos(a), math.sin(a)
+    R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return np.asarray(pts, dtype=float) @ R.T
+
+
+def _mirror_score(rel, ang):
+    """Зеркальность облака rel (N,2, центрировано) относительно
+    плоскости с нормалью (cos a, sin a) через центр. Меньше — симметричнее."""
+    d = rel @ np.array([math.cos(ang), math.sin(ang)])
+    span = max(float(np.ptp(d)), 1e-9)
+    Lh = np.histogram(-d[d < 0], bins=40, range=(0, span))[0]
+    Rh = np.histogram(d[d >= 0], bins=40, range=(0, span))[0]
+    return float(np.abs(Lh - Rh).sum()) / max(float(len(d)), 1.0)
+
+
+def _leg_axis_2d(pts, z0, h):
+    """Ось разделения ног (2D, горизонталь) по кластерам стволов —
+    сильнейший сигнал для кадра: нормаль зеркальной плоскости = ось,
+    соединяющая левую и правую ногу пары. None если ноги не читаются.
+    """
+    band = pts[(pts[:, 2] >= z0 + 0.05 * h) &
+               (pts[:, 2] <= z0 + 0.12 * h)]
+    if len(band) < 40:
+        return None
+    cls = _clusters(band[:, :2], 0.012 * h,
+                    max(6, int(0.003 * len(band))))
+    if not cls:
+        return None
+    top = cls[0]["n"]
+    cs = [c for c in cls if c["n"] >= 0.18 * top][:6]
+    if len(cs) < 2:
+        return None
+    C = np.array([c["c"] for c in cs])
+    idx = list(range(len(C)))
+    axes = []
+    while len(idx) >= 2:                # попарно ближайшие (пары L/R)
+        best = None
+        for i in range(len(idx)):
+            for j in range(i + 1, len(idx)):
+                dd = float(np.linalg.norm(C[idx[i]] - C[idx[j]]))
+                if best is None or dd < best[0]:
+                    best = (dd, i, j)
+        _, i, j = best
+        v = C[idx[j]] - C[idx[i]]
+        nv = float(np.linalg.norm(v))
+        if 1e-9 < nv < 0.6 * h:         # внутри пары, не между парами
+            v = v / nv
+            # канонический знак (направление mod 180), иначе оси пары
+            # (+Y) и (-Y) усредняются в ноль и кадр теряется
+            if v[0] < 0 or (abs(v[0]) < 1e-12 and v[1] < 0):
+                v = -v
+            axes.append(v)
+        del idx[j], idx[i]
+    if not axes:
+        return None
+    # круговое среднее по УДВОЕННЫМ углам: направление оси определено
+    # mod 180, простое среднение векторов гасит (+Y) и (Y+eps/-Y)
+    # соседние пары (оси 90 и 90.05 при флипе знака давали вектор (1,0))
+    sx = sum(math.cos(2.0 * math.atan2(v[1], v[0])) for v in axes)
+    sy = sum(math.sin(2.0 * math.atan2(v[1], v[0])) for v in axes)
+    if abs(sx) < 1e-12 and abs(sy) < 1e-12:
+        return None
+    theta = 0.5 * math.atan2(sy, sx)
+    a = np.array([math.cos(theta), math.sin(theta)])
+    if a[0] < 0 or (abs(a[0]) < 1e-12 and a[1] < 0):
+        a = -a
+    return a
+
+
+def _yaw_score(rel, legs_cls, ang):
+    """Полный скор плоскости с нормалью (cos a, sin a) с выбором сдвига:
+    зеркальность масс + штраф 0.5 за ногу, разрезанную плоскостью
+    (левая/правая нога всегда целиком по одну сторону). Возвращает
+    (score, offset)."""
+    n = np.array([math.cos(ang), math.sin(ang)])
+    d = rel @ n
+    span = max(float(np.ptp(d)), 1e-9)
+    best = (None, 0.0)
+    for off in np.linspace(-0.10 * span, 0.10 * span, 9):
+        Lh = np.histogram(off - d[d < off], bins=40, range=(0, span))[0]
+        Rh = np.histogram(d[d >= off] - off, bins=40, range=(0, span))[0]
+        s = float(np.abs(Lh - Rh).sum()) / max(float(len(d)), 1.0)
+        if legs_cls:
+            mass, strad = 0, 0
+            for P in legs_cls:
+                dp = (P @ n) - off
+                nl = int(np.sum(dp >= 0))
+                nr = len(dp) - nl
+                mass += len(dp)
+                if min(nl, nr) >= max(6, int(0.15 * len(dp))):
+                    strad += len(dp)
+            s += 0.5 * (strad / max(mass, 1))
+        if best[0] is None or s < best[0]:
+            best = (s, float(off))
+    return best
+
+
+def _head_facing(pts, z0, h):
+    """Голос головы: верхняя масса выдаётся вперёд относительно груди.
+    Возвращает +1/-1 или None (не читается)."""
+    top = pts[pts[:, 2] >= z0 + 0.86 * h]
+    if len(top) < 15:
+        return None
+    bl = _blobs3d(top, 0.03 * h, max(10, int(0.002 * len(pts))))
+    if not bl:
+        return None
+    b = max(bl, key=lambda d: float(np.max(d["P"][:, 2])))
+    d = float(b["c"][0]) - float(
+        pts[(pts[:, 2] >= z0 + 0.55 * h) &
+            (pts[:, 2] <= z0 + 0.72 * h)][:, 0].mean()) if \
+        len(pts[(pts[:, 2] >= z0 + 0.55 * h) &
+                (pts[:, 2] <= z0 + 0.72 * h)]) >= 15 else None
+    if d is None or abs(d) < 0.015 * h:
+        return None
+    return 1.0 if d > 0 else -1.0
+
+
+def _canonical_yaw(pts):
+    """Канонический поворот вокруг Z: зеркальная плоскость тела -> y=yc,
+    лицо -> +X (знак — голосование носки/голова).
+
+    v2.6.0: тело может стоять под ЛЮБЫМ yaw (авто-ориентация ошиблась,
+    ручные углы, экзотика движка). Угол плоскости выбирается среди
+    кандидатов (топ зеркальности + ось разделения ног) по полному
+    скору: зеркальность масс + штраф за ногу, разрезанную плоскостью
+    (масс-гистограммы у почти симметричных тел слабые — у "бесстопого"
+    гуманоида выбирали 22° вместо 90°; ноги дают точный сигнал).
+    Возвращает (deg, known): deg — на сколько повернуть точки, чтобы
+    они встали в канонический кадр; known — определено ли лицо
+    (иначе знак вперёд/назад не гарантирован)."""
+    sub = pts[::max(1, len(pts) // 30000)][:, :2]
+    rel = sub - sub.mean(axis=0)
+    z0 = float(pts[:, 2].min())
+    z1 = float(pts[:, 2].max())
+    h = max(z1 - z0, 1e-9)
+    # кандидаты: топ зеркальности + ось разделения ног
+    scored = sorted((_mirror_score(rel, math.radians(float(a))),
+                     float(a)) for a in range(0, 180, 5))
+    best_mirror = scored[0][1]
+    legs_cls = None
+    la = _leg_axis_2d(pts, z0, h)
+    la_deg = None
+    if la is not None:
+        la_deg = math.degrees(math.atan2(la[1], la[0])) % 180.0
+        band = pts[(pts[:, 2] >= z0 + 0.05 * h) &
+                   (pts[:, 2] <= z0 + 0.12 * h)]
+        lc = _clusters(band[:, :2], 0.012 * h,
+                       max(6, int(0.003 * len(band))))
+        top = lc[0]["n"] if lc else 0
+        legs_cls = [band[c["idx"]][:, :2] for c in lc
+                    if c["n"] >= 0.18 * top][:6]
+    best_a, best_s = None, None
+    if la is not None:
+        # ноги — сильнейший сигнал: верим только им (у почти симметричных
+        # тел масс-гистограммы одинаковы в обоих направлениях и топ
+        # зеркальности выигрывал мусорный угол 22°)
+        window = np.linspace(la_deg - 4.0, la_deg + 4.0, 9)
+    else:
+        window = np.linspace(best_mirror - 4.0, best_mirror + 4.0, 9)
+    for a in window:
+        a = float(a) % 180.0
+        s = _yaw_score(rel, legs_cls, math.radians(a))[0]
+        if best_s is None or s < best_s:
+            best_a, best_s = a, s
+    deg = 90.0 - best_a               # нормаль плоскости -> ось Y (бока)
+    pc = _rotz(pts, deg)
+    vote = 0.0
+    fac = _facing_offset(pc, z0, h)
+    if fac is not None and abs(fac[0]) > 0.012 * h:
+        vote += 1.0 if fac[0] > 0 else -1.0
+    hv = _head_facing(pc, z0, h)
+    if hv is not None:
+        vote += 0.7 * hv
+    known = abs(vote) >= 0.5
+    if vote < -0.5:
+        deg += 180.0                  # лицо смотрело в -X -> развернуть
+    deg = ((deg + 180.0) % 360.0) - 180.0
+    return deg, known
+
+
 def _cov_axis(P):
     """Главная ось облака точек (единичный вектор)."""
     ctr = P.mean(axis=0)
@@ -253,60 +459,72 @@ def _facing_offset(pts, z0, h):
 
 
 def face_rotation(pts):
-    """Стадия 2: rot Z, чтобы лицо смотрело в +X.
+    """rot Z (градусы), чтобы лицо смотрело в +X.
 
-    Основной способ — по носкам/пальцам лап (они торчат вперёд):
-    знак поворота становится правильным в обоих направлениях
-    (v2.4.0 у двуногих крутил вслепую на +90 — персонаж мог встать
-    лицом назад). Запасной путь — старая эвристика по числу ног и
-    глубине/длине корпуса."""
-    z0 = float(pts[:, 2].min())
-    z1 = float(pts[:, 2].max())
-    h = z1 - z0
-    fac = _facing_offset(pts, z0, h)
-    if fac is not None:
-        return math.degrees(math.atan2(-fac[1], fac[0]))
-    band = pts[(pts[:, 2] >= z0 + 0.04 * h) &
-               (pts[:, 2] <= z0 + 0.08 * h)]
-    n_legs = 0
-    cls = _clusters(band[:, :2], 0.025 * h, max(8, int(0.008 * len(band))))
-    if cls:
-        n_legs = len([c for c in cls if c["n"] >= 0.25 * cls[0]["n"]])
-    mid = pts[(pts[:, 2] >= z0 + 0.35 * h) & (pts[:, 2] <= z0 + 0.75 * h)]
-    if len(mid) < 20:
-        mid = pts
-    ex = float(np.ptp(mid[:, 0]))
-    ey = float(np.ptp(mid[:, 1]))
-    top = pts[pts[:, 2] >= z1 - 0.25 * h]
-    rz = 0.0
-    if n_legs >= 4:                        # спайн горизонтален
-        if ey > ex:                        # длина вдоль Y -> на X
-            rz = -90.0 if float(top[:, 1].mean()) >= 0 else 90.0
-        else:                              # длина вдоль X
-            cx = float(mid[:, 0].mean())
-            if float(top[:, 0].mean()) < cx - 0.04 * h:
-                rz = 180.0                 # голова в -X -> развернуть
-    else:                                  # двуногий: глубина -> X
-        if ey < ex:                        # глубина вдоль Y
-            rz = 90.0
-    return rz
+    v2.6.0: зеркальная плоскость ищется под ЛЮБЫМ углом (тело может
+    стоять под произвольным yaw), знак лица — голосование
+    носки/лапы (вес 1.0) + голова (вес 0.7). Слепые ±90 удалены:
+    именно они разворачивали уже правильно стоящий меш боком
+    (скриншот 2.5.0: rot Z +89.87 при лице +X, руки пропали, носки
+    вбок). Если лицо не читается — вернётся 0.0: риг построится
+    по факту ориентации (analyze канонизирует сам)."""
+    try:
+        deg, known = _canonical_yaw(pts)
+    except Exception:
+        return 0.0
+    if not known:
+        return 0.0
+    return deg
 
 
 # ------------------------------------------------------------- ноги
 
 def _leg_paths(pts, z0, h, yc):
-    """Ноги: кластеры у земли -> медиальные пути вверх до слияния с телом.
+    """Ноги: кластеры стволов над ступнёй -> медиальные пути вверх до
+    слияния с телом.
 
+    v2.6.0: ствол ищется в полосе 0.07-0.11h (НАД ступнёй), радиус
+    хода и порог слияния — от чистого среза ствола. Раньше оба мерялись
+    по кластеру у земли, т.е. по СТУПНЕ: её длина раздувала радиус,
+    её масса — порог, слияние с телом срабатывало на бедре —
+    «короткие ноги» (скриншот 2.5.0). Носок — среднее передних 15%
+    точек стопы (устойчиво к случайной вершине пятки).
     Возвращает список dict(side, r, ankle, hip, knee, toe, path, top_z).
     Считает ЛЮБОЕ число конечностей (2, 4, 6...).
     """
-    zA, zB = z0 + 0.035 * h, z0 + 0.08 * h
+    zA, zB = z0 + 0.07 * h, z0 + 0.11 * h          # ствол над ступнёй
     band = pts[(pts[:, 2] >= zA) & (pts[:, 2] <= zB)]
+    if len(band) < 30:                             # короткие ноги (птицы)
+        band = pts[(pts[:, 2] >= z0 + 0.04 * h) &
+                   (pts[:, 2] <= z0 + 0.11 * h)]
     if len(band) < 30:
         raise CreatureError("нижняя станция пуста — меш не стоит на земле")
-    cls = _clusters(band[:, :2], 0.022 * h, max(8, int(0.006 * len(band))))
+    cls = _clusters(band[:, :2], 0.020 * h,
+                    max(8, int(0.005 * len(band))))
     if not cls:
         raise CreatureError("у земли не найдено ни одной конечности")
+    # кластеры могут склеиться, если зазор между ногами попал в одну
+    # ячейку сетки: разрезаем любой кластер, чьи точки лежат по ОБЕ
+    # стороны плоскости симметрии (бока тела всегда зеркальны) (v2.6.0)
+    split = []
+    for c in cls:
+        if c["idx"] is None:
+            split.append(c)
+            continue
+        P = band[c["idx"]]
+        Lp = P[P[:, 1] >= yc]
+        Rp = P[P[:, 1] < yc]
+        lim = max(6, int(0.15 * len(P)))
+        if len(Lp) >= lim and len(Rp) >= lim:
+            for part in (Lp, Rp):
+                split.append({"n": len(part),
+                              "c": (float(part[:, 0].mean()),
+                                    float(part[:, 1].mean())),
+                              "sp": (float(np.ptp(part[:, 0])),
+                                     float(np.ptp(part[:, 1])))})
+        else:
+            split.append(c)
+    cls = split
     top_n = cls[0]["n"]
     cls = [c for c in cls if c["n"] >= 0.22 * top_n]
     if len(cls) > 12:
@@ -314,23 +532,49 @@ def _leg_paths(pts, z0, h, yc):
                             % len(cls))
     legs = []
     for c in cls:
-        r = max(0.5 * min(c["sp"]), 0.008 * h)
-        ankle = np.array([c["c"][0], c["c"][1], zA])
-        path = [tuple(ankle)]
         cur = np.array(c["c"])
-        z = zA
-        merge_n = max(25, int(1.3 * c["n"]))
+        side = 1.0 if float(cur[1]) >= yc else -1.0
+        s_own = (pts[:, 1] - yc) * side > -0.002 * h      # своя сторона
+        z_mid = 0.5 * (zA + zB)
+        r0 = max(0.5 * min(c["sp"]), 0.010 * h)
+        sel0 = pts[(np.abs(pts[:, 2] - z_mid) < 0.014 * h) &
+                   (((pts[:, 0] - cur[0]) ** 2 +
+                     (pts[:, 1] - cur[1]) ** 2) < (2.5 * r0) ** 2) &
+                   s_own]
+        if len(sel0) >= 8:
+            # радиус ствола: перцентиль расстояний до оси ноги; соседняя
+            # нога отфильтрована своей стороной плоскости симметрии
+            d0 = np.linalg.norm(sel0[:, :2] - cur[None, :], axis=1)
+            r = max(1.25 * float(np.percentile(d0, 60)), 0.008 * h)
+            n_sh = float(np.sum(d0 <= r))
+        else:
+            r = r0
+            n_sh = float(c["n"])
+        ankle = np.array([float(cur[0]), float(cur[1]),
+                          float(z0 + 0.045 * h)])
+        path = [tuple(ankle)]
+        merge_n = max(25.0, 1.5 * n_sh)
         hip = None
+        z = zB
         while z < z0 + 0.80 * h:
             z += 0.02 * h
             sel = pts[(np.abs(pts[:, 2] - z) < 0.012 * h) &
                       (((pts[:, 0] - cur[0]) ** 2 +
-                        (pts[:, 1] - cur[1]) ** 2) < (2.4 * r) ** 2)]
+                        (pts[:, 1] - cur[1]) ** 2) < (1.7 * r) ** 2) &
+                      s_own]
             if len(sel) < 5:
                 break
             sp = max(float(np.ptp(sel[:, 0])),
                      float(np.ptp(sel[:, 1])))
-            if len(sel) >= merge_n or sp > 4.0 * r:
+            # слияние с телом: масса среза, размах или центроид,
+            # уехавший внутрь (таз/корпус стягивают центр срезa вбок —
+            # у ноги он совпадает с cur). Одного счёта мало: у крупного
+            # таза окно 1.7r ловит меньше 1.5x ствола и ходьба лезла
+            # вверх по торсу до груди («короткие ноги», v2.6.0)
+            cen = np.array([float(sel[:, 0].mean()),
+                            float(sel[:, 1].mean())])
+            off = float(np.linalg.norm(cen - cur))
+            if len(sel) >= merge_n or sp > 3.0 * r or off > 0.7 * r:
                 hip = np.array([float(cur[0]), float(cur[1]), float(z)])
                 break
             cur = np.array([float(sel[:, 0].mean()),
@@ -351,12 +595,14 @@ def _leg_paths(pts, z0, h, yc):
             knee = P[int(np.argmax(np.where(window, dev, -1.0)))]
         else:
             knee = 0.5 * (a + b)
-        # стопа: передняя кромка низа ноги
+        # стопа: носок = среднее передних 15% точек низа ноги
         foot = pts[(pts[:, 2] < z0 + 0.05 * h) &
                    (np.linalg.norm(pts[:, :2] - ankle[:2], axis=1) <
                     3.0 * r)]
         if len(foot) >= 10:
-            toe = np.array([float(foot[:, 0].max()), float(ankle[1]),
+            xs = np.sort(foot[:, 0])
+            k = max(1, int(0.15 * len(xs)))
+            toe = np.array([float(xs[-k:].mean()), float(ankle[1]),
                             z0 + 0.025 * h])
         else:
             toe = ankle + np.array([0.5 * r, 0.0, 0.0])
@@ -445,14 +691,45 @@ def _torso_profile(pts, legs, z0, h):
         zs.append(float(zc))
     if len(path) < 4:
         raise CreatureError("ядро тела не найдено")
-    # ширина торса: 70-й процентиль полуширины |y - yc| по срезам
-    # (медиана ломается на длинной шее: её срезов больше, чем срезов торса)
-    ws = []
+    # ширина торса: медиана полуширины ЯДРА среза в ПОЯСЕ ТАЗА
+    # (кластер, ближайший к пути торса). 70/45-й процентиль по всему
+    # торсу ломался на прижатых руках: они сливаются с корпусом на
+    # 30-80% срезов (A-pose) и перекашивают ширину, из-за чего
+    # отсекатель |y-yc| > belly_w становился шире рук и не находил их.
+    # Пояс таза [слияние ног - 0.04h .. + 0.04h] — руки туда обычно
+    # не доходят, скорлупа тела внутри (v2.6.0)
+    zw = []
     for (px, py, pz) in path:
         sl = pts[np.abs(pts[:, 2] - pz) < 0.012 * h]
-        if len(sl) >= 8:
-            ws.append(float(np.abs(sl[:, 1] - py).max()))
-    belly_w = float(np.percentile(ws, 70)) if ws else 0.1 * h
+        if len(sl) < 8:
+            continue
+        w = None
+        cand = _clusters(sl[:, :2], 0.015 * h, 5)
+        if cand:
+            d2 = [(cc["c"][0] - px) ** 2 + (cc["c"][1] - py) ** 2
+                  for cc in cand]
+            core = cand[int(np.argmin(d2))]
+            w = float(np.abs(sl[core["idx"], 1] - py).max())
+        if w is None:
+            w = float(np.abs(sl[:, 1] - py).max())
+        zw.append((pz, w))
+    z_leg_top = max(l["top_z"] for l in legs) if legs else z0 + 0.3 * h
+    ws_hip = [w for (pz, w) in zw
+              if z_leg_top - 0.04 * h <= pz <= z_leg_top + 0.04 * h]
+    belly_w = None
+    if len(ws_hip) >= 3 and float(np.median(ws_hip)) > 0.03 * h:
+        belly_w = float(np.median(ws_hip))
+    if belly_w is None:
+        # пояс таза не попал в тело (птица: корпус заметно выше
+        # слияния ног; осколки капсулы дают ширины ~0) — берём полосу
+        # [слияние .. +0.30h], выкинув ширины < 30% максимума (осколки)
+        band = [w for (pz, w) in zw
+                if z_leg_top - 0.02 * h <= pz <= z_leg_top + 0.30 * h]
+        ref = max(band) if band else \
+            (max(w for _pz, w in zw) if zw else 0.0)
+        band = [w for w in band if w >= 0.30 * ref] or \
+            [w for _pz, w in zw if w >= 0.30 * ref]
+        belly_w = float(np.median(band)) if band else 0.1 * h
     belly_w = max(belly_w, 0.02 * h)
     return {"path": path, "zs": zs, "top_z": zs[-1], "belly_w": belly_w}
 
@@ -495,20 +772,37 @@ def _blob_flatness(P, attach=None):
 
 def _classify_lateral(blobs, torso, h, yc, n_legs):
     """Латеральные массы -> (arms, wings). Каждая масса — отдельный
-    dict (пары не склеиваются: левая и правая строятся независимо)."""
+    dict (пары не склеиваются: левая и правая строятся независимо).
+
+    Зеркальная пара решает класс ВМЕСТЕ (средний flatness):
+    конечности существа одинаковы, а сечение середины у каждой
+    меряется по своей выборке — порог 0.25 ловил одну руку крылом
+    (птица v2.6.0: рук 2 / крыльев 1)."""
     arms, wings = [], []
     pairs, singles = _pair_by_mirror(blobs, yc, 0.10 * h)
     cand = []
     for a, b in pairs:
         cand += [a, b]
     cand += singles
+    flat_by_id = {}
+    for a, b in pairs:
+        fa = _blob_flatness(a["P"], a["P"][int(np.argmin(
+            np.abs(a["P"][:, 1] - yc)))])
+        fb = _blob_flatness(b["P"], b["P"][int(np.argmin(
+            np.abs(b["P"][:, 1] - yc)))])
+        fm = 0.5 * (fa + fb)
+        flat_by_id[id(a)] = fm
+        flat_by_id[id(b)] = fm
     for bl in cand:
         P = bl["P"]
         ext = bl["ext"]
         main = max(ext)
         # крепление: точка блока ближе всего к плоскости симметрии
         attach = P[int(np.argmin(np.abs(P[:, 1] - yc)))]
-        flat = _blob_flatness(P, attach)
+        if id(bl) in flat_by_id:
+            flat = flat_by_id[id(bl)]
+        else:
+            flat = _blob_flatness(P, attach)
         # крыло = плоская перепонка; рука = круглое сечение
         is_wing = (n_legs >= 4) or (flat < 0.25 and main > 0.30 * h)
         zi = min(range(len(torso["zs"])),
@@ -751,6 +1045,14 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
     Возвращает dict(plan, spec, h, report, joints, notes).
     plan результата: human | biped | bird | biped_wings | biped_tail |
     quadruped | winged_quad | creature.
+
+    v2.6.0: разбор инвариантен к повороту вокруг вертикали (yaw).
+    Перед анализом точки канонизируются (_canonical_yaw: зеркальная
+    плоскость -> y=yc, лицо -> +X по голосованию носки/голова) —
+    плагин больше не
+    предполагает, что меш заранее правильно повернут (ошибки
+    авто-ориентации больше не ломают руки/носки/хвост). Спека и
+    суставы в конце отображаются обратно в мировые координаты.
     """
     if np is None:
         raise CreatureError("numpy недоступен")
@@ -762,6 +1064,9 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
     h = z1 - z0
     if h < 0.05:
         raise CreatureError("высота меша %.3f м" % h)
+    # канонический кадр: бока ±Y, лицо +X (независимо от поворота меша)
+    yaw, face_known = _canonical_yaw(pts)
+    pts = _rotz(pts, yaw)
     yc = _sym_yc(pts)
     notes = []
     joints = []
@@ -775,10 +1080,15 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
 
     torso = _torso_profile(pts, legs, z0, h)
 
-    # латеральные массы (руки/крылья) за пределами ширины торса
+    # латеральные массы (руки/крылья) за пределами ширины торса:
+    # не только по |y-yc|, но и по расстоянию до оси торса — грудная
+    # «скорлупа» (шире талии) остаётся внутри, прижатая рука снаружи
     z_hip_line = min(l["top_z"] for l in legs)
     lat = pts[(pts[:, 2] > z_hip_line - 0.02 * h) &
-              (np.abs(pts[:, 1] - yc) > torso["belly_w"] + 0.018 * h)]
+              (np.abs(pts[:, 1] - yc) > torso["belly_w"] + 0.008 * h)]
+    if len(lat):
+        lat = lat[_dist_to_path(lat, torso["path"]) >
+                  1.15 * torso["belly_w"]]
     for l in legs:
         if len(lat):
             lat = lat[_dist_to_path(lat, l["path"]) > 2.2 * l["r"]]
@@ -825,17 +1135,51 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
                 # весь Auto-Rig: строим универсального двуногого
                 notes.append("human-контракт не собрался (%s)" % e)
             else:
+                face_rep = "лицо определено" if face_known else \
+                    "лицо НЕ определено (знак вперёд/назад не гарантирован)"
                 return {
-                    "plan": "human", "spec": fitted,
+                    "plan": "human", "spec": _rotz_spec(fitted, -yaw),
                     "h": float(lm["height"]),
                     "report": ("План: человек — контракт 18 костей, мышцы "
-                               "и анимация neurosim доступны"),
-                    "joints": joints, "notes": notes,
+                               "и анимация neurosim доступны; %s" % face_rep),
+                    "joints": _rotz_joints(joints, -yaw),
+                    "notes": notes,
                 }
 
     if plan == "HUMAN":
         raise CreatureError("человек не распознан (план задан "
                             "принудительно)")
+
+    # -------------------------------- руки по пропорциям (страховка)
+    # У двуногого без рук/крыльев руки могли СЛИТЬСЯ с корпусом
+    # (A-pose впритык) — ни один отсекатель их не выделит. Скелет без
+    # рук — главный баг скриншота 2.5.0: добавляем цепочки по
+    # антропометрии человека (плечо 0.80h, кисть до середины бедра)
+    if plan in ("AUTO", "HUMAN") and n_legs == 2 and not arms \
+            and not wings and not tail_yes:
+        z_sh = z_hip_line + 0.78 * max(torso["top_z"] - z_hip_line,
+                                       0.10 * h)
+        z_sh = min(z_sh, z0 + 0.84 * h)
+        y_sh = 0.5 * torso["belly_w"] + 0.045 * h
+        zi_sh = min(range(len(torso["zs"])),
+                    key=lambda i: abs(torso["zs"][i] - z_sh))
+        x_sh = torso["path"][zi_sh][0]
+        r_a = max(0.030 * h, 0.10 * torso["belly_w"])
+        for s in (+1, -1):
+            sh = np.array([x_sh, s * y_sh, z_sh])
+            hand = np.array([x_sh, s * (y_sh + 0.05 * h),
+                             max(z_sh - 0.40 * h, z_hip_line)])
+            P_a = _capsule_pts(sh, hand, r_a, 220)
+            arms.append({"P": P_a, "attach": sh,
+                         "c": tuple(0.5 * (sh + hand)),
+                         "dir": _cov_axis(P_a),
+                         "ext": (float(np.ptp(P_a[:, 0])),
+                                 float(np.ptp(P_a[:, 1])),
+                                 float(np.ptp(P_a[:, 2]))),
+                         "n": len(P_a), "side": s, "flat": 1.0})
+            joints.append(("attach", sh[0], sh[1], sh[2]))
+        notes.append("руки не выделены из геометрии (слиты с корпусом?) "
+                     "— добавлены по пропорциям человека")
 
     # ----------------------------------------- универсальная спека
     out = []
@@ -910,7 +1254,7 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
             base = "leg%d" % (rank // 2 + 1)
         hip_pt, knee, ankle, toe = l["hip"], l["knee"], l["ankle"], \
             l["toe"]
-        r_u = max(l["r"] * 1.15, 0.01 * h)
+        r_u = max(l["r"] * 1.35, 0.011 * h)   # бедро от ствола (r — голень)
         hip_anchor = np.array([pelvis_c[0], float(hip_pt[1]),
                                float(hip_pt[2])])
         un, ln, fn = ("%s_%s_upper" % (base, sfx),
@@ -1025,6 +1369,12 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
         notes.append("задан план %s, распознан %s" %
                      (plan.lower(), plan_id))
 
+    if face_known:
+        notes.append("лицо определено по носкам/голове")
+    else:
+        notes.append("лицо не определено — риг построен по факту; если "
+                     "носки смотрят назад, Rot Z 180 и Build Skeleton снова")
+
     rep = ("План: %s — ног %d, рук %d, крыльев %d, хвост %s, шея %s; "
            "костей %d%s" % (
                plan_id, n_legs, len(arms), len(wings),
@@ -1037,15 +1387,20 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
     if plan_id != "human":
         rep += (". Мышцы X-Muscle и анимация neurosim — только для "
                 "human-плана")
+    spec_w = _rotz_spec({"name": "creature_v1", "root": "pelvis",
+                         "links": out}, -yaw)
     return {"plan": plan_id,
-            "spec": {"name": "creature_v1", "root": "pelvis",
-                     "links": out},
-            "h": h, "report": rep, "joints": joints, "notes": notes}
+            "spec": spec_w,
+            "h": h, "report": rep,
+            "joints": _rotz_joints(joints, -yaw), "notes": notes}
 
 
-def _generic_fingers(out, parent_name, tip, d, r, h, sfx="L"):
+def _generic_fingers(out, parent_name, tip, d, r, h, sfx="L",
+                     kind="arm"):
     """Стандартные 5 пальцев веером у кончика кисти (когда геометрия
-    не разделила пальцы)."""
+    не разделила пальцы). Имена в той же схеме, что и геометрические:
+    fng_<kind>_<side>_std_<i>_<seg> (v2.6.0: раньше было fng_L_std_…
+    без kind — несогласованно с fng_arm_L_1_1)."""
     d = np.asarray(d, dtype=float)
     d = d / max(float(np.linalg.norm(d)), 1e-9)
     u = _perp(d)
@@ -1057,12 +1412,70 @@ def _generic_fingers(out, parent_name, tip, d, r, h, sfx="L"):
             (u * math.cos(ang) + v * math.sin(ang)) * (1.6 * r)
         mid = base + d * (0.55 * L)
         end = base + d * L
-        nm1 = "fng_%s_std_%d_1" % (sfx, fi + 1)
-        nm2 = "fng_%s_std_%d_2" % (sfx, fi + 1)
+        nm1 = "fng_%s_%s_std_%d_1" % (kind, sfx, fi + 1)
+        nm2 = "fng_%s_%s_std_%d_2" % (kind, sfx, fi + 1)
         out.append(_link(nm1, parent_name, base, mid,
                          max(0.25 * r, 0.004 * h), mid - base))
         out.append(_link(nm2, nm1, mid, end,
                          max(0.2 * r, 0.003 * h), end - mid))
+
+
+def _rotz_spec(spec, deg):
+    """Повернуть спеку вокруг Z на deg градусов (канонический кадр ->
+    мировые координаты). Координаты звеньев/якорей поворачиваются,
+    оси капсул пересчитываются по повернутому направлению, оси
+    суставов поворачиваются как векторы, полуразмеры боксов — через
+    описанный повернутый бокс (yaw сохраняет высоту)."""
+    a = math.radians(deg)
+    c, s = math.cos(a), math.sin(a)
+
+    def p3(v):
+        x, y = float(v[0]), float(v[1])
+        return [round(x * c - y * s, 5), round(x * s + y * c, 5),
+                round(float(v[2]), 5)]
+
+    def v3(v):
+        x, y = float(v[0]), float(v[1])
+        return np.array([x * c - y * s, x * s + y * c, float(v[2])])
+
+    out = {"name": spec.get("name"), "root": spec.get("root", "pelvis"),
+           "links": []}
+    for l in spec["links"]:
+        l2 = dict(l)
+        l2["com"] = p3(l["com"])
+        if l.get("joint"):
+            j = dict(l["joint"])
+            j["anchor"] = p3(j["anchor"])
+            ax = np.asarray(j.get("axis", [0, 1, 0]), dtype=float)
+            j["axis"] = [round(float(t), 4) for t in v3(ax)]
+            l2["joint"] = j
+        if l.get("shape"):
+            sh = dict(l["shape"])
+            if sh["type"] == "capsule":
+                dv = np.zeros(3)
+                dv["xyz".index(sh.get("axis", "z"))] = 1.0
+                dr = v3(dv)
+                sh["axis"] = "xyz"[int(np.argmax(np.abs(dr)))]
+            elif sh["type"] == "box":
+                hx, hy = float(sh["half"][0]), float(sh["half"][1])
+                sh["half"] = [round(abs(c) * hx + abs(s) * hy, 5),
+                              round(abs(s) * hx + abs(c) * hy, 5),
+                              round(float(sh["half"][2]), 5)]
+            l2["shape"] = sh
+        out["links"].append(l2)
+    return out
+
+
+def _rotz_joints(joints, deg):
+    """Повернуть список суставов [(name, x, y, z), ...] вокруг Z."""
+    a = math.radians(deg)
+    c, s = math.cos(a), math.sin(a)
+    out = []
+    for item in joints:
+        name, x, y, z = item[0], float(item[1]), float(item[2]), \
+            float(item[3])
+        out.append((name, x * c - y * s, x * s + y * c, z))
+    return out
 
 
 # -------------------------------------------------------- landmarks
