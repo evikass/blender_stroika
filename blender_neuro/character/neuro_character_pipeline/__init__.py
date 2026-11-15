@@ -11,7 +11,7 @@ URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слета
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 3, 1),
+    "version": (2, 4, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -40,12 +40,14 @@ if "ncp_comfy" in locals():  # reload при правках в текст-ред
     importlib.reload(ncp_muscles)
     importlib.reload(neuro_rig)
     importlib.reload(neuro_autorig)
+    importlib.reload(neuro_creature)
 else:
     from . import ncp_comfy
     from . import ncp_img3d
     from . import ncp_muscles
     from . import neuro_rig
     from . import neuro_autorig
+    from . import neuro_creature
 
 
 # ------------------------------------------------------------ состояние
@@ -287,8 +289,10 @@ def _build_rig(context, mesh):
         st.mesh_rot_x, st.mesh_rot_z = rot_x, rot_z
     if st.auto_rig:
         try:
-            return _build_rig_fitted(context, mesh, spec, rot_x, rot_z)
+            return _build_rig_auto(context, mesh, spec, rot_x, rot_z)
         except neuro_autorig.RigFitError as e:
+            reason = "Auto-Rig не удался (%s)" % e
+        except neuro_creature.CreatureError as e:
             reason = "Auto-Rig не удался (%s)" % e
         except Exception as e:                       # не роняем риг целиком
             reason = ("Auto-Rig упал с ошибкой (%s: %s)"
@@ -311,30 +315,53 @@ def _build_rig(context, mesh):
     return arm
 
 
-def _build_rig_fitted(context, mesh, spec, rot_x, rot_z):
-    """Auto-Rig в стиле Hyper3D: скелет подгоняется под тело.
+def _build_rig_auto(context, mesh, spec, rot_x, rot_z):
+    """Auto-Rig: универсальный разбор тела (neuro_creature).
 
-    Меш поворачивается (авто-ориентация) и ставится низом в z=0,
-    размер НЕ меняется. По вершинам ищутся точки тела, из них
-    собирается та же 18-костная спека (контракт human.json), арматура
-    строится по ней, меш скинится как есть. При неудаче кидается
-    RigFitError — вызывающий код откатывается на старый режим."""
+    Меш ставится низом в z=0 (авто-ориентация в 2 стадии: подъём,
+    потом доворот продольной оси к +X), размер НЕ меняется. По
+    вершинам определяется план тела: сколько ног, есть ли руки/
+    крылья/хвост/шея, сколько пальцев. Человек отдаётся в контракт
+    18 костей human.json (мышцы и анимация neurosim работают),
+    остальные планы получают creature-спеку в той же схеме. При
+    неудаче кидается RigFitError/CreatureError — вызывающий код
+    откатывается на старый режим."""
     st = _st(context)
-    neuro_autorig.place_mesh(mesh, rot_x_deg=rot_x, rot_z_deg=rot_z,
-                             do_apply=st.apply_transforms)
-    pts = neuro_autorig.mesh_world_points(mesh)
-    fitted, lm, info = neuro_autorig.fit_spec_to_mesh(spec, pts)
-    arm = neuro_rig.build_armature(fitted, name="NeuroCharacter")
-    arm["ncp_height"] = float(lm["height"])
-    if st.add_fingers:
-        neuro_rig.add_finger_chains(arm, scale=lm["height"] / 1.70)
+    hint = st.body_plan
+    if st.orient_auto:
+        rot_x = neuro_creature.orient_stand(mesh)
+        neuro_autorig.place_mesh(mesh, rot_x_deg=rot_x, rot_z_deg=0.0,
+                                 do_apply=st.apply_transforms)
+        pts = neuro_autorig.mesh_world_points(mesh)
+        rot_z = neuro_creature.face_rotation(pts)
+        if abs(rot_z) > 1e-6:
+            neuro_autorig.place_mesh(mesh, rot_x_deg=0.0,
+                                     rot_z_deg=rot_z,
+                                     do_apply=st.apply_transforms)
+            pts = neuro_autorig.mesh_world_points(mesh)
+        st.mesh_rot_x, st.mesh_rot_z = rot_x, rot_z
+    else:
+        neuro_autorig.place_mesh(mesh, rot_x_deg=rot_x, rot_z_deg=rot_z,
+                                 do_apply=st.apply_transforms)
+        pts = neuro_autorig.mesh_world_points(mesh)
+    res = neuro_creature.analyze(pts, base_spec=spec, plan=hint,
+                                 add_fingers=st.add_fingers)
+    arm = neuro_rig.build_armature(res["spec"], name="NeuroCharacter")
+    arm["ncp_height"] = float(res["h"])
+    if res["plan"] == "human":
+        if st.add_fingers:
+            neuro_rig.add_finger_chains(arm, scale=res["h"] / 1.70)
+    else:
+        arm["ncp_plan"] = res["plan"]
+        if res["notes"]:
+            arm["ncp_notes"] = "; ".join(res["notes"])
     neuro_rig.skin_mesh_to_armature(mesh, arm)
     if st.debug_landmarks:
-        neuro_autorig.make_debug_empties(lm)
-    note = ("; смотрит назад — rot Z = -90"
-            if st.orient_auto and (abs(rot_x) > 1e-6 or abs(rot_z) > 1e-6)
-            else "")
-    st.status = info + note
+        neuro_creature.make_landmarks(res["joints"], res["h"])
+    note = ("; если смотрит назад — rot Z = 180 и Build Skeleton снова"
+            if res["plan"] != "human" and st.orient_auto and
+            abs(rot_x) > 1e-6 else "")
+    st.status = res["report"] + note
     return arm
 
 
@@ -565,12 +592,37 @@ class NCP_Props(bpy.types.PropertyGroup):
         description="Запечь масштаб/поворот меша перед скинингом "
                     "(рекомендуется)")
     auto_rig: BoolProperty(
-        name="Auto-Rig (как в Hyper3D)", default=True,
-        description="Скелет подгоняется под тело: по геометрии меша "
-                    "находятся промежность, колени, плечи, локти, шея — "
-                    "и кости ставятся туда. Меш остаётся в своих "
-                    "пропорциях. Выключить = старый режим (меш "
-                    "масштабируется под скелет 1.70 м)")
+        name="Auto-Rig (universal)", default=True,
+        description="Скелет подгоняется под тело любого плана: аддон "
+                    "сам определяет, сколько ног/рук/крыльев/хвостов у "
+                    "персонажа, ищет колени, локти, шею и пальцы по "
+                    "геометрии меша. Меш остаётся в своих пропорциях. "
+                    "Выключить = старый режим (меш масштабируется под "
+                    "скелет 1.70 м)")
+    body_plan: EnumProperty(
+        name="Body plan",
+        items=[
+            ('AUTO', "Auto", "Определить план тела автоматически: "
+             "ноги считаются у земли, крылья/руки/хвост/шея — по "
+             "геометрии. Подходит для любых существ"),
+            ('HUMAN', "Human", "Двуногий человек: контракт 18 костей "
+             "human.json (мышцы X-Muscle и анимация neurosim "
+             "доступны). Выберите, если Auto перепутал"),
+            ('QUADRUPED', "Quadruped", "Четыре ноги, без крыльев "
+             "(собака, кошка, лошадь): 2 передние + 2 задние пары "
+             "костей"),
+            ('WINGED_QUAD', "Winged quadruped", "Четыре ноги + крылья "
+             "(дракон, пегас): плюс цепочки крыльев, хвост, шея"),
+            ('BIRD', "Bird", "Две ноги + крылья (птица, грифон): "
+             "ноги-цепочки и тонкие крылья"),
+            ('DRAGON', "Dragon", "Классический дракон: 4 ноги + "
+             "крылья + длинная шея + хвост"),
+        ],
+        default='AUTO',
+        description="План тела для Auto-Rig. Auto определяет сам "
+                    "(число ног у земли, крылья по тонкости и креплению "
+                    "за спиной); остальные варианты отключают "
+                    "распознавание и строят скелет по выбранному плану")
     debug_landmarks: BoolProperty(
         name="Show landmarks", default=False,
         description="Создать пустышки-маркеры в найденных точках тела "
@@ -866,8 +918,10 @@ class NCP_OT_dl_models(bpy.types.Operator):
 class NCP_OT_build_skeleton(bpy.types.Operator):
     bl_idname = "ncp.build_skeleton"
     bl_label = "Build Skeleton"
-    bl_description = ("Построить neuro-скелет (human.json) внутри меша, "
-                      "подогнать меш под скелет и назначить автовесы")
+    bl_description = ("Построить скелет внутри меша: план тела "
+                      "(ноги/руки/крылья/хвост/шея/пальцы) определяется "
+                      "по геометрии; меш остаётся в своих пропорциях, "
+                      "весы назначаются автоматически")
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -913,6 +967,14 @@ class NCP_OT_add_muscles(bpy.types.Operator):
         if not ncp_muscles.installed():
             msg = ("X-Muscle System не включён — включите его в "
                    "Preferences -> Add-ons (поиск: X-Muscle)")
+            _fail(context, msg)
+            self.report({"ERROR"}, msg)
+            return {"CANCELLED"}
+        plan = arm.get("ncp_plan", "human")
+        if plan != "human":
+            msg = ("Скелет построен как %s — мышцы X-Muscle работают "
+                   "только с human-контрактом (18 костей). Перестройте "
+                   "с Body plan = Human, если мышцы нужны" % plan)
             _fail(context, msg)
             self.report({"ERROR"}, msg)
             return {"CANCELLED"}
@@ -1008,6 +1070,12 @@ class NCP_OT_import_motion(bpy.types.Operator, ImportHelper):
                 raise RuntimeError("Это не neuro motion JSON "
                                    "(нет spec/frames)")
             arm = bpy.data.objects.get("NeuroCharacter")
+            if arm is not None and \
+                    arm.get("ncp_plan", "human") != "human":
+                raise RuntimeError(
+                    "Скелет creature-плана (%s) не принимает анимацию "
+                    "neurosim: она пишется под human-контракт 18 костей"
+                    % arm.get("ncp_plan"))
             if arm is None:
                 ao = context.view_layer.objects.active
                 if ao is not None and ao.type == "ARMATURE":
@@ -1565,6 +1633,7 @@ class NCP_PT_rig(_NCPSubPanel):
         row = lay.row(align=True)
         row.prop(st, "orient_auto")
         row.prop(st, "auto_rig", text="Auto-Rig")
+        lay.prop(st, "body_plan")
         row = lay.row(align=True)
         row.prop(st, "add_fingers")
         row.prop(st, "debug_landmarks", text="Landmarks")
@@ -1572,9 +1641,12 @@ class NCP_PT_rig(_NCPSubPanel):
         row.prop(st, "replace_existing", text="Replace")
         row.prop(st, "apply_transforms", text="Apply")
         _hint(lay, "Auto-Rig (вкл. по умолчанию): скелет подгоняется "
-                   "под тело — промежность, плечи, колени ищутся по "
-                   "геометрии меша, пропорции персонажа сохраняются. "
-                   "Выключить = меш масштабируется под скелет 1.70 м")
+                   "под тело ЛЮБОГО плана — аддон сам считает ноги, "
+                   "находит руки/крылья/хвост/шею и пальцы по "
+                   "геометрии. Body plan = Auto; если план известен "
+                   "— задайте его явно. Человек получает контракт 18 "
+                   "костей (мышцы/анимация работают), прочие — "
+                   "универсальный скелет по существу")
 
 
 class NCP_PT_muscles(_NCPSubPanel):
