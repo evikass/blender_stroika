@@ -320,13 +320,17 @@ def fit_mesh_to_skeleton(mesh, spec, rot_x_deg=0.0, rot_z_deg=0.0,
 
 # ------------------------------------------------------------- пальцы
 
-# (имя, сдвиг по Z от ладони, длина цепочки, м) — косметика для позирования
+# (имя, сдвиг в ПЛОСКОСТИ ЛАДОНИ (вперёд=+X), прогиб ВНИЗ, длина, м)
+# v2.9.0: пальцы растут от ЗАПЯСТЬЯ и веером в плоскости ладони.
+# Раньше база ставилась на длину предплечья + 7 см ЗА кисть, а веер
+# расходился по мировому Z — ладонь выглядела повёрнутой на 90°, а
+# кости пальцев висели в воздухе рядом с рукой (жалобы 2.7/2.8).
 FINGER_PLAN = (
-    ("thumb", 0.030, 0.062),
-    ("index", 0.012, 0.078),
-    ("middle", 0.000, 0.084),
-    ("ring", -0.012, 0.078),
-    ("pinky", -0.030, 0.062),
+    ("thumb", 0.030, 0.012, 0.062),
+    ("index", 0.014, 0.005, 0.078),
+    ("middle", 0.000, 0.000, 0.084),
+    ("ring", -0.014, 0.005, 0.078),
+    ("pinky", -0.028, 0.010, 0.062),
 )
 
 
@@ -334,14 +338,23 @@ def finger_bone_names():
     """Имена 20 добавочных костей пальцев (в спеке human.json их нет)."""
     out = []
     for side in ("L", "R"):
-        for fname, _off, _ln in FINGER_PLAN:
+        for fname, _off_p, _off_n, _ln in FINGER_PLAN:
             out.append("fng_%s_1_%s" % (fname, side))
             out.append("fng_%s_2_%s" % (fname, side))
     return out
 
 
 def add_finger_chains(arm_obj, scale=1.0):
-    """По 10 костей пальцев от концов предплечий farm_L/farm_R.
+    """По 10 костей пальцев от запястий farm_L/farm_R — В ПЛОСКОСТИ
+    ЛАДОНИ.
+
+    neuro-контракт: лицо +X, руки в T-pose вдоль ±Y, ладони вниз.
+    Направление пальцев = вдоль предплечья (arm_dir); веер расходится
+    поперёк руки в горизонтали, развёрнутой к лицу (+X): большой
+    палец вперёд, мизинец назад; лёгкий прогиб всех пальцев вниз
+    (третье число плана — положительный прогиб в метрах).
+    Это даёт анатомичную кисть и в T-pose, и в A-pose (направления
+    считаются от фактической кости farm_*, а не захардкожены).
     neuro-анимация (apply_animation) ведёт только кости спеки, пальцы
     просто едут вместе с рукой — на контракт нейросима не влияют.
     scale — множитель размеров (рост персонажа / 1.70 м)."""
@@ -357,17 +370,40 @@ def add_finger_chains(arm_obj, scale=1.0):
         eb_p = arm_data.edit_bones.get(par)
         if eb_p is None:
             continue
-        base = eb_p.tail + eb_p.vector * (eb_p.length + 0.07 * scale)
-        for fname, off_z, ln in FINGER_PLAN:
-            head = base + Vector((0.0, 0.0, off_z * scale))
+        arm_dir = eb_p.vector
+        if arm_dir.length < 1e-9:
+            arm_dir = Vector((1.0, 0.0, 0.0))
+        arm_dir = arm_dir.normalized()
+        # веер: горизонталь поперёк руки, развёрнутая К ЛИЦУ (+X).
+        # T-pose (рука вдоль ±Y): получаем +X с обеих сторон —
+        # большой палец вперёд у левой И правой кисти
+        spread = Vector((arm_dir.y * 1.0 - arm_dir.z * 0.0,
+                         arm_dir.z * 0.0 - arm_dir.x * 1.0,
+                         0.0))
+        if spread.length < 1e-6:            # рука почти вертикальна
+            spread = Vector((1.0, 0.0, 0.0))
+        spread = spread.normalized()
+        if spread.x < 0.0:
+            spread = -spread
+        # прогиб вниз (мировая -Z без компоненты вдоль руки);
+        # у вертикальной руки вырождается — просто без прогиба
+        droop = Vector((0.0, 0.0, -1.0))
+        droop = droop - arm_dir * droop.dot(arm_dir)
+        droop = droop.normalized() if droop.length > 1e-6 else None
+        # база — сразу за запястьем (хвост farm = точка кисти)
+        base = eb_p.tail + arm_dir * (0.02 * scale)
+        for fname, off_p, off_d, ln in FINGER_PLAN:
+            head = base + spread * (off_p * scale)
+            if droop is not None and off_d > 1e-9:
+                head = head + droop * (off_d * scale)
             parent = eb_p
             for seg in (1, 2):
                 eb = arm_data.edit_bones.new(
                     "fng_%s_%d_%s" % (fname, seg, side))
                 eb.head = head
-                eb.tail = head + eb_p.vector * (ln * scale *
-                                                (0.55 if seg == 1
-                                                 else 0.45))
+                eb.tail = head + arm_dir * (ln * scale *
+                                            (0.55 if seg == 1
+                                             else 0.45))
                 eb.roll = 0.0
                 eb.parent = parent
                 head = eb.tail

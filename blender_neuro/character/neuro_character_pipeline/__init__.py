@@ -11,7 +11,7 @@ URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слета
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 8, 0),
+    "version": (2, 9, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -278,10 +278,17 @@ def _add_controls(context, arm):
     Возвращает короткую заметку для статус-карточки (или "")."""
     st = _st(context)
     try:
-        return neuro_controls.build_controls(
+        note = neuro_controls.build_controls(
             arm, ik_on=bool(st.ctrl_ik),
             hide_deform=bool(st.ctrl_hide_deform),
             fingers=bool(st.ctrl_fingers), poles=bool(st.ctrl_poles))
+        try:
+            # слои записи и режим — на арматуру (v2.9.0)
+            neuro_controls.rec_set_state(arm, _rec_state_from_props(st))
+            arm["ncp_mode"] = "ANIM" if st.rig_mode == "ANIM" else "TPOSE"
+        except Exception:
+            pass
+        return note
     except Exception as e:
         try:
             st.status += " | рычаги не построились (%s: %s)" \
@@ -574,6 +581,59 @@ def _ctrl_rebuild_update(self, context):
         pass
 
 
+def _rec_state_from_props(st):
+    """dict слоёв записи из пропсов панели."""
+    return {"body": bool(st.rec_body), "arms": bool(st.rec_arms),
+            "legs": bool(st.rec_legs), "fingers": bool(st.rec_fingers),
+            "wings": bool(st.rec_wings)}
+
+
+def _rig_mode_update(self, context):
+    """Переключатель T-поза/Анимация: IK + сброс позы на риге."""
+    arm = bpy.data.objects.get("NeuroCharacter")
+    if arm is None or arm.type != "ARMATURE":
+        return
+    try:
+        rep = neuro_controls.set_mode(arm, self.rig_mode)
+        st = context.scene.ncp
+        st.status = rep
+    except Exception:
+        pass
+
+
+def _rec_auto_update(self, context):
+    """Мастер-галка автозаписи: depsgraph-хэндлер + Blender auto-key."""
+    arm = bpy.data.objects.get("NeuroCharacter")
+    try:
+        neuro_controls.record_set_enabled(bool(self.rec_auto))
+    except Exception:
+        pass
+    try:
+        context.scene.tool_settings.use_keyframe_insert_auto = \
+            bool(self.rec_auto)
+    except Exception:
+        pass
+    if arm is not None:
+        try:
+            neuro_controls.rec_set_state(
+                arm, _rec_state_from_props(context.scene.ncp))
+        except Exception:
+            pass
+
+
+def _rec_layers_update(self, context):
+    """Галки слоёв записи: сохранить на арматуру (их читает
+    depsgraph-хэндлер и кнопка «Записать кадр»)."""
+    arm = bpy.data.objects.get("NeuroCharacter")
+    if arm is None:
+        return
+    try:
+        neuro_controls.rec_set_state(
+            arm, _rec_state_from_props(context.scene.ncp))
+    except Exception:
+        pass
+
+
 class NCP_Props(bpy.types.PropertyGroup):
     # --- шаг 1: эскиз
     sketch_path: StringProperty(
@@ -735,6 +795,38 @@ class NCP_Props(bpy.types.PropertyGroup):
         description="Спрятать остовные кости скелета — в вьюпорте "
                     "остаются только крупные рычаги; они не деформируют "
                     "меш и анимации не мешают")
+    # --- режим и запись (v2.9.0)
+    rig_mode: EnumProperty(
+        name="Mode",
+        items=[("ANIM", "Анимация", "IK включён: тяните рычаги — "
+                "персонаж двигается"),
+               ("TPOSE", "T-Поза", "IK выключен, поза сброшена в rest: "
+                "персонаж стоит в T-позе, как построен")],
+        default="ANIM", update=_rig_mode_update,
+        description="Режим скелета: T-поза (нейтрально) или анимация "
+                    "(движения за рычаги)")
+    rec_auto: BoolProperty(
+        name="Record layers (auto)", default=False,
+        update=_rec_auto_update,
+        description="Автозапись по слоям: пока включено, любое "
+                    "изменение позы рычагов включённых слоёв "
+                    "автоматически ставит кейфрейм на текущем кадре "
+                    "(auto-key только для рычагов)")
+    rec_body: BoolProperty(
+        name="Body", default=True, update=_rec_layers_update,
+        description="Слой «Корпус»: Root, Body, Head, Tail")
+    rec_arms: BoolProperty(
+        name="Arms", default=True, update=_rec_layers_update,
+        description="Слой «Руки»: рычаги рук и полюсы локтей")
+    rec_legs: BoolProperty(
+        name="Legs", default=True, update=_rec_layers_update,
+        description="Слой «Ноги»: рычаги ног и полюсы коленей")
+    rec_fingers: BoolProperty(
+        name="Fingers", default=True, update=_rec_layers_update,
+        description="Слой «Пальцы»: рычаги пальцев (оранжевые диски)")
+    rec_wings: BoolProperty(
+        name="Wings", default=True, update=_rec_layers_update,
+        description="Слой «Крылья»: рычаги крыльев")
     # --- шаг 5: мышцы
     muscle_style: EnumProperty(
         name="Style",
@@ -1100,6 +1192,77 @@ class NCP_OT_rebuild_handles(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class NCP_OT_set_mode(bpy.types.Operator):
+    bl_idname = "ncp.set_mode"
+    bl_label = "Set Rig Mode"
+    bl_description = ("Переключить режим скелета: T-Поза — IK выключен, "
+                      "поза сброшена в rest (персонаж как построен); "
+                      "Анимация — IK включён, тяните рычаги и персонаж "
+                      "двигается")
+    bl_options = {"REGISTER", "UNDO"}
+
+    mode: EnumProperty(
+        name="Mode",
+        items=[("TPOSE", "T-Поза", ""),
+               ("ANIM", "Анимация", "")],
+        default="ANIM")
+
+    @classmethod
+    def poll(cls, context):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        return arm is not None and arm.type == "ARMATURE"
+
+    def execute(self, context):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        st = _st(context)
+        try:
+            rep = neuro_controls.set_mode(arm, self.mode)
+            try:
+                st.rig_mode = self.mode   # update-колбэк идемпотентен
+            except Exception:
+                pass
+            st.status = rep
+            self.report({"INFO"}, rep)
+        except Exception as e:
+            _fail(context, "Режим: %s: %s" % (type(e).__name__, e))
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class NCP_OT_record_key(bpy.types.Operator):
+    bl_idname = "ncp.record_key"
+    bl_label = "Record Layer Key"
+    bl_description = ("Записать текущую позу рычагов включённых слоёв "
+                      "кейфреймом на текущий кадр: поставьте кадр, "
+                      "позарайте персонажа рычагами, нажмите — слои "
+                      "задаются галками Body/Arms/Legs/Fingers/Wings")
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        return arm is not None and arm.type == "ARMATURE"
+
+    def execute(self, context):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        st = _st(context)
+        try:
+            n = neuro_controls.record_frame(arm, _rec_state_from_props(st))
+        except Exception as e:
+            _fail(context, "Запись: %s: %s" % (type(e).__name__, e))
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        try:
+            f = int(context.scene.frame_current)
+        except Exception:
+            f = 0
+        msg = "Записано рычагов: %d (кадр %d)" % (n, f)
+        st.status = msg
+        self.report({"INFO"}, msg)
+        return {"FINISHED"}
+
+
 class NCP_OT_add_muscles(bpy.types.Operator):
     bl_idname = "ncp.add_muscles"
     bl_label = "Add Muscles"
@@ -1259,6 +1422,16 @@ class NCP_OT_import_motion(bpy.types.Operator, ImportHelper):
             except Exception:
                 pass
             st.ctrl_ik = False
+            # автозапись останавливаем: записанное движение важнее
+            # (иначе хэндлер начнёт затирать кадры позой из replay)
+            try:
+                neuro_controls.record_set_enabled(False)
+            except Exception:
+                pass
+            try:
+                st.rec_auto = False
+            except Exception:
+                pass
             if st.build_world and payload.get("world"):
                 neuro_rig.add_ground()
                 neuro_rig.build_world_props(payload["world"])
@@ -1877,6 +2050,56 @@ class NCP_PT_handles(_NCPSubPanel):
                    "движение: он выключит IK сам")
 
 
+class NCP_PT_modes(_NCPSubPanel):
+    bl_label = "4c · Pose & Record"
+    bl_idname = "NCP_PT_modes"
+
+    @classmethod
+    def poll(cls, context):
+        return bpy.data.objects.get("NeuroCharacter") is not None
+
+    def _head(self, context):
+        try:
+            st = context.scene.ncp
+            self.layout.label(icon="POSE_DATA" if st.rig_mode == "ANIM"
+                              else "ARMATURE_DATA")
+        except Exception:
+            self.layout.label(icon="POSE_DATA")
+
+    def _content(self, context):
+        st = context.scene.ncp
+        lay = self.layout
+        row = lay.row(align=True)
+        row.scale_y = 1.3
+        row.operator("ncp.set_mode", text="T-Поза", icon="ARMATURE_DATA",
+                     depress=st.rig_mode == "TPOSE").mode = "TPOSE"
+        row.operator("ncp.set_mode", text="Анимация", icon="POSE_DATA",
+                     depress=st.rig_mode == "ANIM").mode = "ANIM"
+        _hint(lay, "T-Поза — скелет в rest, IK выключен. Анимация — "
+                   "тяните рычаги (кольца суставов, диски пальцев): "
+                   "персонаж двигается")
+        lay.separator()
+        box = lay.box()
+        box.label(text="Запись движений по слоям", icon="REC")
+        box.prop(st, "rec_auto")
+        row = box.row(align=True)
+        row.prop(st, "rec_body")
+        row.prop(st, "rec_arms")
+        row = box.row(align=True)
+        row.prop(st, "rec_legs")
+        row.prop(st, "rec_fingers")
+        row = box.row(align=True)
+        row.prop(st, "rec_wings")
+        row.operator("ncp.record_key", text="+ Кадр",
+                     icon="KEYFRAMES_INSERT")
+        _hint(box, "Автозапись: двигаете рычаг включённого слоя — "
+                   "кейфрейм ставится сам (только рычаги, остовные "
+                   "кости не пишутся). «+ Кадр» — записать текущую позу "
+                   "слоёв в текущий кадр вручную")
+        _hint(box, "Слой Корпус = Root/Body/Head/Tail; Импорт Neuro "
+                   "Motion выключает автозапись сам")
+
+
 class NCP_PT_muscles(_NCPSubPanel):
     bl_label = "5 · Muscles (X-Muscle)"
     bl_idname = "NCP_PT_muscles"
@@ -2071,6 +2294,8 @@ classes = (
     NCP_OT_build_skeleton,
     NCP_OT_select_handles,
     NCP_OT_rebuild_handles,
+    NCP_OT_set_mode,
+    NCP_OT_record_key,
     NCP_OT_add_muscles,
     NCP_OT_attach_muscles,
     NCP_OT_bake_muscles,
@@ -2085,6 +2310,7 @@ classes = (
     NCP_PT_mesh,
     NCP_PT_rig,
     NCP_PT_handles,
+    NCP_PT_modes,
     NCP_PT_muscles,
     NCP_PT_anim,
     NCP_PT_settings,
@@ -2119,6 +2345,10 @@ def register():
 def unregister():
     if bpy.app.timers.is_registered(_tick):
         bpy.app.timers.unregister(_tick)
+    try:
+        neuro_controls.record_set_enabled(False)   # depsgraph-хэндлер записи
+    except Exception:
+        pass
     JOB.update(active=False, phase="", next="")
     _unregister_vendor()
     try:

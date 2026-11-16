@@ -28,6 +28,17 @@ neuro_character_pipeline.neuro_controls — слой рычагов (control han
   4. пальцевые рычаги попадают в отдельную коллекцию костей
      NCP_Controls_Fine — их можно скрыть отдельно от крупных рычагов.
 
+Формы рычагов (2.9.0): пальцы — маленькие оранжевые ДИСКИ
+(NCP_Shape_Disc), остальные суставы — КОЛЬЦА с полым ободом
+(NCP_Shape_Ring: сустав виден сквозь кольцо), Root — большое кольцо,
+Body — диск. set_mode() — переключатель «T-поза / анимация»
+(TPOSE: IK выкл + поза рычагов сброшена в rest; ANIM: IK вкл).
+Запись по слоям: record_frame() ставит кейфрейм текущей позы рычагов
+включённых слоёв (body/arms/legs/fingers/wings), record_set_enabled()
+подключает depsgraph-хэндлер автозаписи — изменилась поза рычага
+включённого слоя, кейфрейм на текущем кадре (остовные кости и
+нейроанимация не затрагиваются).
+
 Иерархия: CTRL_Root -> CTRL_Body -> pelvis. Root/Body/Head/Tail —
 прямое parenting (двигаются всегда, никаких констрейнтов); Arm/Wing/
 Foot/Pole — IK-цели и полюсы, parent CTRL_Root (при движении тела
@@ -88,7 +99,7 @@ _KIND_COLOR = {
     "wing": (0.65, 0.35, 0.90, 0.9),
     "tail": (0.40, 0.80, 0.90, 0.9),
     "pole": (0.90, 0.25, 0.55, 0.9),
-    "finger": (0.95, 0.60, 0.15, 0.9),
+    "finger": (1.00, 0.45, 0.00, 0.9),
 }
 
 # имена человеческих пальцев (add_finger_chains: fng_thumb_1_L ...)
@@ -316,13 +327,24 @@ def find_chains(arm_obj):
 
 # ------------------------------------------------- формы и косметика
 
+def _circle(n=24, r=1.0, z=0.0):
+    return [(r * math.cos(6.2831853 * i / n),
+             r * math.sin(6.2831853 * i / n), z) for i in range(n)]
+
+
+# диск: центр + полное кольцо вершин, один n-gon (в 2.8.0 последний
+# сегмент терялся — лицо многоугольника было собрано неверно)
 _SHAPE_DISC = (
-    [(1.0, 0.0, 0.0)] + [
-        (math.cos(6.2831853 * i / 24.0),
-         math.sin(6.2831853 * i / 24.0), 0.0)
-        for i in range(24)
-    ],
-    [list(range(24))],
+    [(0.0, 0.0, 0.0)] + _circle(24, 1.0),
+    [list(range(25))],
+)
+# кольцо (полый обод): видно сустав сквозь него — «кольца на суставах»,
+# которые просил пользователь; диск остался на пальцах
+_o = _circle(24, 1.0)
+_i = _circle(24, 0.62)
+_SHAPE_RING = (
+    _o + _i,
+    [[k, (k + 1) % 24, 24 + (k + 1) % 24, 24 + k] for k in range(24)],
 )
 _SHAPE_BOX = (
     [(-0.6, -0.6, -0.6), (0.6, -0.6, -0.6), (0.6, 0.6, -0.6),
@@ -332,6 +354,7 @@ _SHAPE_BOX = (
      (2, 3, 7, 6), (3, 0, 4, 7)],
 )
 SHAPES = {"disc": ("NCP_Shape_Disc", _SHAPE_DISC),
+          "ring": ("NCP_Shape_Ring", _SHAPE_RING),
           "box": ("NCP_Shape_Box", _SHAPE_BOX)}
 
 
@@ -829,13 +852,15 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
             pass
 
     # -- косметика: формы, цвета, коллекции, видимость
+    # пальцы — оранжевые ДИСКИ; остальные суставы — КОЛЬЦА (полый обод,
+    # сустав виден сквозь него); Root — большое кольцо, Body — диск
     pose = arm_obj.pose.bones
     for name, kind in (("CTRL_Root", "root"), ("CTRL_Body", "body")):
         try:
             pb = pose.get(name)
             if pb is not None:
-                _set_shape(pb, "box" if kind == "root" else "disc",
-                           0.16 * h if kind == "root" else 0.12 * h)
+                _set_shape(pb, "ring" if kind == "root" else "disc",
+                           0.17 * h if kind == "root" else 0.12 * h)
                 _set_color(pb, _KIND_COLOR[kind])
         except Exception:
             pass
@@ -844,7 +869,8 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
             pb = pose.get(name)
             if pb is None:
                 continue
-            _set_shape(pb, "disc", kind_sizes.get(name, 0.09 * h))
+            _set_shape(pb, "disc" if name.startswith("CTRL_Finger_")
+                       else "ring", kind_sizes.get(name, 0.09 * h))
             _set_color(pb, _KIND_COLOR[_bone_kind(name)])
         except Exception:
             pass
@@ -1030,3 +1056,231 @@ def select_handles(context, arm_obj):
     except Exception:
         pass
     return handle_names(arm_obj)
+
+
+# --------------------------------- режим: T-поза / анимация (2.9.0)
+
+def reset_pose(arm_obj):
+    """Сброс позы в rest (T-поза): обнулить location/rotation/scale
+    всех рычагов и IK-хелперов. Остовные кости не трогаем — при
+    выключенном IK они свободны и уже стоят как записано.
+    Возвращает число сброшенных костей."""
+    n = 0
+    try:
+        for pb in arm_obj.pose.bones:
+            if not (pb.name.startswith(PFX) or
+                    pb.name.startswith(HLP_PFX)):
+                continue
+            for attr, val in (("location", (0.0, 0.0, 0.0)),
+                              ("rotation_quaternion",
+                               (1.0, 0.0, 0.0, 0.0)),
+                              ("scale", (1.0, 1.0, 1.0))):
+                try:
+                    setattr(pb, attr, val)
+                except Exception:
+                    pass
+            n += 1
+    except Exception:
+        pass
+    return n
+
+
+def set_mode(arm_obj, mode):
+    """Понятный переключатель «T-поза / движения».
+
+    TPOSE — IK выключен, поза рычагов сброшена в rest: персонаж стоит
+           в своей T-позе, как построен;
+    ANIM  — IK включён: тяните рычаги (кольца суставов, диски
+           пальцев), персонаж двигается.
+    Возвращает строку отчёта."""
+    mode = "TPOSE" if str(mode).upper().startswith("T") else "ANIM"
+    if mode == "TPOSE":
+        set_ik(arm_obj, False)
+        n = reset_pose(arm_obj)
+        rep = "T-поза: IK выкл, рычаги сброшены (%d)" % n
+    else:
+        set_ik(arm_obj, True)
+        rep = "Анимация: IK вкл — тяните рычаги"
+    try:
+        arm_obj["ncp_mode"] = mode
+    except Exception:
+        pass
+    return rep
+
+
+def get_mode(arm_obj):
+    try:
+        return arm_obj.get("ncp_mode") or "ANIM"
+    except Exception:
+        return "ANIM"
+
+
+# ------------------------------------ запись движений по слоям (2.9.0)
+
+# слои записи: какие рычаги попадают в кейфреймы
+REC_LAYERS = ("body", "arms", "legs", "fingers", "wings")
+
+_REC = {"on": False, "snap": {}}
+
+
+def rec_layer_of(name):
+    """Слой записи для рычага (или None — не рычаг)."""
+    if name.startswith("CTRL_Finger_"):
+        return "fingers"
+    if name.startswith(("CTRL_Arm", "CTRL_Pole_Elbow")):
+        return "arms"
+    if name.startswith(("CTRL_Foot", "CTRL_Pole_Knee")):
+        return "legs"
+    if name.startswith("CTRL_Wing"):
+        return "wings"
+    if name.startswith(("CTRL_Root", "CTRL_Body", "CTRL_Head",
+                        "CTRL_Tail")):
+        return "body"
+    return None
+
+
+def rec_layers_state(arm_obj):
+    """Включённые слои записи (хранятся на арматуре; по умолчанию все)."""
+    st = {k: True for k in REC_LAYERS}
+    try:
+        raw = arm_obj.get("ncp_rec_layers")
+        if raw:
+            for k, v in dict(raw).items():
+                if k in st:
+                    st[k] = bool(v)
+    except Exception:
+        pass
+    return st
+
+
+def rec_set_state(arm_obj, state):
+    """Сохранить включённые слои записи на арматуру."""
+    try:
+        arm_obj["ncp_rec_layers"] = {
+            k: bool(v) for k, v in dict(state).items() if k in REC_LAYERS}
+    except Exception:
+        pass
+
+
+def rec_layer_bones(arm_obj, enabled=None):
+    """Рычаги включённых слоёв записи."""
+    if enabled is None:
+        enabled = rec_layers_state(arm_obj)
+    out = []
+    try:
+        for pb in arm_obj.pose.bones:
+            lay = rec_layer_of(pb.name)
+            if lay is not None and enabled.get(lay):
+                out.append(pb)
+    except Exception:
+        pass
+    return out
+
+
+def record_frame(arm_obj, enabled=None, frame=None):
+    """Кейфрейм текущей позы рычагов включённых слоёв («Записать кадр»
+    и автозапись). Кадр по умолчанию — текущий. Возвращает число
+    закейфрейменных костей."""
+    if frame is None:
+        try:
+            frame = int(bpy.context.scene.frame_current)
+        except Exception:
+            frame = 1
+    if enabled is None:
+        enabled = rec_layers_state(arm_obj)
+    n = 0
+    try:
+        for pb in rec_layer_bones(arm_obj, enabled):
+            ok = False
+            for dp in ("location", "rotation_quaternion"):
+                try:
+                    pb.keyframe_insert(dp, frame=frame)
+                    ok = True
+                except Exception:
+                    pass
+            if ok:
+                n += 1
+    except Exception:
+        pass
+    return n
+
+
+def _rec_snapshot(pbs):
+    """Подпись позы рычагов (круг до 4 знаков) — чтобы запись шла
+    только когда поза реально изменилась (скролл кадров не пишет)."""
+    sig = []
+    for pb in pbs:
+        try:
+            loc = tuple(round(float(v), 4) for v in pb.location)
+        except Exception:
+            loc = ()
+        try:
+            rot = tuple(round(float(v), 4)
+                        for v in pb.rotation_quaternion)
+        except Exception:
+            rot = ()
+        sig.append((pb.name, loc, rot))
+    return tuple(sig)
+
+
+def _rec_tick(scene, depsgraph):
+    """depsgraph-хэндлер автозаписи: поза рычагов включённых слоёв
+    изменилась — кейфрейм на текущем кадре (влияние констрейнтов
+    NCP_* уже в костях, пишем итоговую позу)."""
+    try:
+        if not _REC.get("on"):
+            return
+        try:
+            arms = [o for o in scene.objects
+                    if getattr(o, "type", "") == "ARMATURE"]
+        except Exception:
+            return
+        for arm_obj in arms:
+            try:
+                if not arm_obj.get("ncp_ctrl"):
+                    continue
+                enabled = rec_layers_state(arm_obj)
+                pbs = rec_layer_bones(arm_obj, enabled)
+                if not pbs:
+                    continue
+                sig = _rec_snapshot(pbs)
+                if _REC["snap"].get(arm_obj.name) == sig:
+                    continue
+                _REC["snap"][arm_obj.name] = sig
+                record_frame(arm_obj, enabled)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def record_is_enabled():
+    return bool(_REC.get("on"))
+
+
+def record_set_enabled(on):
+    """Вкл/выкл автозапись по слоям (depsgraph-хэндлер). Возвращает
+    фактическое состояние (False, если bpy.app.handlers недоступен)."""
+    handlers = getattr(bpy.app, "handlers", None)
+    lst = getattr(handlers, "depsgraph_update_post", None) \
+        if handlers is not None else None
+    if lst is None:
+        _REC["on"] = False
+        return False
+    on = bool(on)
+    if on and not _REC.get("on"):
+        try:
+            if _rec_tick not in lst:
+                lst.append(_rec_tick)
+        except Exception:
+            pass
+    elif not on and _REC.get("on"):
+        try:
+            if _rec_tick in lst:
+                lst.remove(_rec_tick)
+        except Exception:
+            pass
+    _REC["on"] = on
+    if not on:
+        _REC["snap"] = {}
+    return _REC["on"]

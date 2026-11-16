@@ -64,10 +64,21 @@ class FakeVector:
     def __sub__(self, o):
         return FakeVector(self.x - o.x, self.y - o.y, self.z - o.z)
 
+    def __neg__(self):
+        return FakeVector(-self.x, -self.y, -self.z)
+
     def __mul__(self, k):
         return FakeVector(self.x * k, self.y * k, self.z * k)
 
     __rmul__ = __mul__
+
+    def dot(self, o):
+        return self.x * o.x + self.y * o.y + self.z * o.z
+
+    def cross(self, o):
+        return FakeVector(self.y * o.z - self.z * o.y,
+                          self.z * o.x - self.x * o.z,
+                          self.x * o.y - self.y * o.x)
 
     @property
     def length(self):
@@ -262,9 +273,16 @@ class FakePoseBone:
         self.name = name
         self.rotation_mode = "XYZ"
         self.location = (0.0, 0.0, 0.0)
+        self.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        self.scale = (1.0, 1.0, 1.0)
         self.matrix = None
         self.constraints = FakeConstraints()
         self.select = False
+        self.custom_shape = None
+        self.keys = []
+
+    def keyframe_insert(self, dp, frame=1):
+        self.keys.append((dp, int(frame)))
 
 
 class FakePoseBones:
@@ -404,11 +422,34 @@ class FakeActionsColl:
         return a
 
 
+class FakeShapeMesh:
+    def __init__(self, name):
+        self.name = name
+        self.faces = []
+
+    def from_pydata(self, verts, edges, faces):
+        self.faces = [tuple(f) for f in faces]
+
+
+class FakeMeshesColl:
+    def __init__(self):
+        self._dict = {}
+
+    def get(self, name):
+        return self._dict.get(name)
+
+    def new(self, name):
+        m = FakeShapeMesh(name)
+        self._dict[name] = m
+        return m
+
+
 class FakeData:
     def __init__(self):
         self.armatures = FakeArmaturesColl()
         self.objects = FakeObjectsColl()
         self.actions = FakeActionsColl()
+        self.meshes = FakeMeshesColl()
 
 
 class _ObjColl:
@@ -427,9 +468,12 @@ class FakeScene:
         self.render = types.SimpleNamespace(fps=24)
         self.frame_start = 1
         self.frame_end = 250
+        self.frame_current = 1
+        self.tool_settings = types.SimpleNamespace(
+            use_keyframe_insert_auto=False)
 
     def frame_set(self, f):
-        pass
+        self.frame_current = int(f)
 
 
 bpy = types.ModuleType("bpy")
@@ -449,6 +493,7 @@ bpy.app = types.SimpleNamespace(
         is_registered=lambda f: False,
         register=lambda *a, **k: None,
         unregister=lambda *a, **k: None),
+    handlers=types.SimpleNamespace(depsgraph_update_post=[]),
     version=(5, 4, 0),
     driver_namespace={})
 bpy.ops = types.SimpleNamespace()
@@ -585,15 +630,45 @@ check("uarm_L parented to shoulderP_L",
       eb_uarm.parent.name == "shoulderP_L")
 made = neuro_rig.add_finger_chains(arm, scale=1.0)
 check("add_finger_chains: 20 костей", made == 20, made)
+eb_farm = arm.data.edit_bones.get("farm_L")
 fng_root = arm.data.edit_bones.get("fng_middle_1_L")
 check("fng_middle_1_L parented to farm_L",
       fng_root is not None and fng_root.parent is not None and
       fng_root.parent.name == "farm_L")
-check("пальцевые кости у конца farm (не в центре ладони)",
-      fng_root is not None and
-      (fng_root.head - eb_uarm.tail).length > 0.05,
+# v2.9.0: кости пальцев растут ОТ ЗАПЯСТЬЯ (хвост farm), в плоскости
+# ладони (веер вдоль +X, лёгкий прогиб вниз), пальцы вдоль руки
+check("v2.9.0: пальцы у запястья (base = farm.tail + 2% предплечья)",
+      fng_root is not None and eb_farm is not None and
+      (fng_root.head - eb_farm.tail).length < 0.05,
       None if fng_root is None else
-      (fng_root.head - eb_uarm.tail).length)
+      (fng_root.head - eb_farm.tail).length)
+thumbL = arm.data.edit_bones.get("fng_thumb_1_L")
+pinkyL = arm.data.edit_bones.get("fng_pinky_1_L")
+check("v2.9.0: веер в плоскости ладони: thumb вперёд (+X) pinky",
+      thumbL is not None and pinkyL is not None and
+      thumbL.head.x - pinkyL.head.x > 0.04,
+      None if thumbL is None or pinkyL is None else
+      thumbL.head.x - pinkyL.head.x)
+check("v2.9.0: веер НЕ по мировому Z (ладонь не повернута на 90°)",
+      thumbL is not None and pinkyL is not None and
+      abs(thumbL.head.z - pinkyL.head.z) < 0.03,
+      None if thumbL is None or pinkyL is None else
+      abs(thumbL.head.z - pinkyL.head.z))
+mid_dir = fng_root.tail - fng_root.head
+check("v2.9.0: пальцы направлены вдоль руки (+Y), не вверх",
+      abs(mid_dir.y) > 2.0 * abs(mid_dir.z), mid_dir)
+thumbR = arm.data.edit_bones.get("fng_thumb_1_R")
+pinkyR = arm.data.edit_bones.get("fng_pinky_1_R")
+check("v2.9.0: правая кисть — thumb тоже вперёд (+X)",
+      thumbR is not None and pinkyR is not None and
+      thumbR.head.x - pinkyR.head.x > 0.04,
+      None if thumbR is None or pinkyR is None else
+      thumbR.head.x - pinkyR.head.x)
+check("v2.9.0: прогиб вниз — головки пальцев не выше запястья",
+      thumbL is not None and fng_root is not None and
+      thumbL.head.z <= eb_farm.tail.z + 1e-6 and
+      fng_root.head.z <= eb_farm.tail.z + 1e-6,
+      (thumbL.head.z if thumbL else None, eb_farm.tail.z))
 
 # ========================= C. mesh_world_points + AST-ловушка тени np
 class _MW(FakeMatrix4):
@@ -1106,6 +1181,99 @@ check("controls: select_handles выделил все и только CTRL",
       all(pb.select == pb.name.startswith("CTRL_")
           for pb in arm.pose.bones))
 
+# ============ A2. v2.9.0: кольца/диски, режим T-поза/анимация, запись
+finger_pbs = [pb for pb in arm.pose.bones
+              if pb.name.startswith("CTRL_Finger_")]
+check("v2.9.0: диски пальцев — custom_shape = NCP_Shape_Disc",
+      len(finger_pbs) == 10 and
+      all(pb.custom_shape is not None and
+          pb.custom_shape.name == "NCP_Shape_Disc"
+          for pb in finger_pbs),
+      [pb.custom_shape.name if pb.custom_shape else None
+       for pb in finger_pbs])
+ring_names = ("CTRL_Root", "CTRL_Foot_L", "CTRL_Arm_L",
+              "CTRL_Pole_Knee_L", "CTRL_Head")
+check("v2.9.0: КОЛЬЦА на суставах (Root/Foot/Arm/Pole/Head)",
+      all(_pb(arm, n) is not None and _pb(arm, n).custom_shape is not None
+          and _pb(arm, n).custom_shape.name == "NCP_Shape_Ring"
+          for n in ring_names),
+      [(n, _pb(arm, n).custom_shape.name
+        if _pb(arm, n) is not None and _pb(arm, n).custom_shape else None)
+       for n in ring_names])
+ring_mesh = bpy.data.meshes.get("NCP_Shape_Ring")
+check("v2.9.0: кольцо полое (24 квада-ободка)",
+      ring_mesh is not None and len(ring_mesh.faces) == 24,
+      None if ring_mesh is None else len(ring_mesh.faces))
+disc_mesh = bpy.data.meshes.get("NCP_Shape_Disc")
+check("v2.9.0: диск полный (1 n-gon из 25 вершин)",
+      disc_mesh is not None and len(disc_mesh.faces) == 1,
+      None if disc_mesh is None else len(disc_mesh.faces))
+
+# --- режим: T-поза / анимация
+hpb = _pb(arm, "CTRL_Foot_L")
+hpb.location = (0.3, -0.2, 0.1)
+hpb.rotation_quaternion = (0.7, 0.1, 0.1, 0.7)
+rep_t = nctl.set_mode(arm, "TPOSE")
+check("v2.9.0: set_mode(TPOSE) — IK выкл, поза рычагов сброшена",
+      not nctl.ik_on(arm) and arm["ncp_mode"] == "TPOSE" and
+      tuple(hpb.location) == (0.0, 0.0, 0.0) and
+      tuple(hpb.rotation_quaternion) == (1.0, 0.0, 0.0, 0.0),
+      (rep_t, arm.get("ncp_mode")))
+n_hlp = nctl.reset_pose(arm)
+check("v2.9.0: reset_pose сбрасывает CTRL+NCPK (21+8 = 29), не трогает "
+      "остовные", n_hlp == 29, n_hlp)
+rep_a = nctl.set_mode(arm, "ANIM")
+check("v2.9.0: set_mode(ANIM) — IK включён, режим на арматуре",
+      nctl.ik_on(arm) and arm["ncp_mode"] == "ANIM", rep_a)
+
+# --- запись движений по слоям
+check("v2.9.0: rec_layer_of разложил рычаги по слоям",
+      nctl.rec_layer_of("CTRL_Finger_thumb_L") == "fingers" and
+      nctl.rec_layer_of("CTRL_Arm_L") == "arms" and
+      nctl.rec_layer_of("CTRL_Pole_Elbow_R") == "arms" and
+      nctl.rec_layer_of("CTRL_Foot_L") == "legs" and
+      nctl.rec_layer_of("CTRL_Pole_Knee_L") == "legs" and
+      nctl.rec_layer_of("CTRL_Root") == "body" and
+      nctl.rec_layer_of("CTRL_Head") == "body" and
+      nctl.rec_layer_of("thigh_L") is None)
+n_rec_all = len(nctl.rec_layer_bones(arm))
+check("v2.9.0: все 21 рычага распределены по слоям записи",
+      n_rec_all == len(nctl.handle_names(arm)) == 21, n_rec_all)
+nctl.rec_set_state(arm, {"fingers": False})
+en = nctl.rec_layers_state(arm)
+check("v2.9.0: rec_set_state — слои хранятся на арматуре",
+      en["fingers"] is False and en["body"] is True and
+      len(nctl.rec_layer_bones(arm)) == 11, en)
+nctl.rec_set_state(arm, {})
+for pb in arm.pose.bones:
+    if pb.name.startswith("CTRL_Finger_"):
+        pb.location = (0.05, 0.0, 0.0)
+n_k = nctl.record_frame(arm, {"fingers": True})
+fps = [pb for pb in arm.pose.bones if pb.name.startswith("CTRL_Finger_")]
+check("v2.9.0: record_frame — 10 пальцев закейфреймены (loc+quat)",
+      n_k == 10 and all(len(pb.keys) == 2 for pb in fps), n_k)
+ok_on = nctl.record_set_enabled(True)
+check("v2.9.0: record_set_enabled(True) — хэндлер зарегистрирован",
+      ok_on and nctl.record_is_enabled() and
+      nctl._rec_tick in bpy.app.handlers.depsgraph_update_post)
+tick_scene = types.SimpleNamespace(objects=[arm])
+nctl._rec_tick(tick_scene, None)
+check("v2.9.0: автозапись — tick ставит кейфрейм рычагам слоёв",
+      len(_pb(arm, "CTRL_Foot_L").keys) == 2,
+      len(_pb(arm, "CTRL_Foot_L").keys))
+nctl._rec_tick(tick_scene, None)
+check("v2.9.0: поза не менялась — дублей нет",
+      len(_pb(arm, "CTRL_Foot_L").keys) == 2)
+_pb(arm, "CTRL_Foot_L").location = (0.1, 0.0, 0.0)
+nctl._rec_tick(tick_scene, None)
+check("v2.9.0: поза изменилась — кейфрейм добавлен",
+      len(_pb(arm, "CTRL_Foot_L").keys) == 4,
+      len(_pb(arm, "CTRL_Foot_L").keys))
+ok_off = nctl.record_set_enabled(False)
+check("v2.9.0: record_set_enabled(False) — хэндлер снят",
+      not ok_off and not nctl.record_is_enabled() and
+      nctl._rec_tick not in bpy.app.handlers.depsgraph_update_post)
+
 # ---- creature-планы: рычаги по факту цепочек
 arm_b2 = neuro_rig.build_armature(res_b["spec"], name="BipedArm")
 _mode_set("OBJECT")
@@ -1233,22 +1401,32 @@ pkg = importlib.util.module_from_spec(spec_imp)
 sys.modules["neuro_character_pipeline"] = pkg
 spec_imp.loader.exec_module(pkg)
 
-check("bl_info version 2.8.0", pkg.bl_info["version"] == (2, 8, 0),
+check("bl_info version 2.9.0", pkg.bl_info["version"] == (2, 9, 0),
       pkg.bl_info["version"])
 cls_names = [c.__name__ for c in pkg.classes]
 check("NCP_OT_build_skeleton зарегистрирован",
       "NCP_OT_build_skeleton" in cls_names)
 panels = [n for n in cls_names if n.startswith("NCP_PT_")]
-check("11 панелей", len(panels) == 11, panels)
+check("12 панелей", len(panels) == 12, panels)
 check("панель рычагов NCP_PT_handles есть",
       "NCP_PT_handles" in panels and "NCP_OT_select_handles" in cls_names
       and "NCP_OT_rebuild_handles" in cls_names)
+check("v2.9.0: панель режима NCP_PT_modes + операторы set_mode/record_key",
+      "NCP_PT_modes" in panels and "NCP_OT_set_mode" in cls_names and
+      "NCP_OT_record_key" in cls_names)
 check("AddonPreferences класс есть", "NCP_AddonPrefs" in cls_names)
 ann = getattr(pkg.NCP_Props, "__annotations__", {})
 for p in ("auto_rig", "body_plan", "add_fingers", "orient_auto",
           "mesh_rot_x", "mesh_rot_z", "debug_landmarks",
-          "ctrl_ik", "ctrl_hide_deform", "ctrl_poles", "ctrl_fingers"):
+          "ctrl_ik", "ctrl_hide_deform", "ctrl_poles", "ctrl_fingers",
+          "rig_mode", "rec_auto", "rec_body", "rec_arms", "rec_legs",
+          "rec_fingers", "rec_wings"):
     check("prop NCP_Props.%s" % p, p in ann)
+rm = ann.get("rig_mode")
+rm_ids = [it[0] for it in rm.kwargs["items"]] if isinstance(rm, _PropStub) \
+    else []
+check("rig_mode enum: ANIM/TPOSE",
+      set(rm_ids) == {"ANIM", "TPOSE"}, rm_ids)
 bp = ann.get("body_plan")
 bp_ids = [it[0] for it in bp.kwargs["items"]] if isinstance(bp, _PropStub) \
     else []
@@ -1257,10 +1435,15 @@ check("Body plan enum: AUTO/HUMAN/QUADRUPED/WINGED_QUAD/BIRD/DRAGON",
                       "BIRD", "DRAGON"}, bp_ids)
 with open(os.path.join(ADDON, "blender_manifest.toml"), "rb") as f:
     man = tomllib.load(f)
-check("manifest version 2.8.0", man["version"] == "2.8.0",
+check("manifest version 2.9.0", man["version"] == "2.9.0",
       man["version"])
 with open(os.path.join(ADDON, "INSTALL_RU.txt"), encoding="utf-8") as f:
     install_txt = f.read()
+check("INSTALL_RU: секция 2.9.0 (кольца + режим + запись по слоям)",
+      "ЧТО НОВОГО В 2.9.0" in install_txt and
+      "кольц" in install_txt.lower() and
+      "T-Поза" in install_txt and
+      "сло" in install_txt.lower())
 check("INSTALL_RU: секция 2.8.0 (полюсы + пальцы)",
       "ЧТО НОВОГО В 2.8.0" in install_txt and
       "полюс" in install_txt.lower() and
