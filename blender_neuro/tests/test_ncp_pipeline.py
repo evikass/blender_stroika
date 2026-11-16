@@ -73,6 +73,12 @@ class FakeVector:
     def length(self):
         return math.sqrt(self.x ** 2 + self.y ** 2 + self.z ** 2)
 
+    def normalized(self):
+        L = self.length
+        if L < 1e-9:
+            return FakeVector(1.0, 0.0, 0.0)
+        return FakeVector(self.x / L, self.y / L, self.z / L)
+
     def __repr__(self):
         return "V(%.3f,%.3f,%.3f)" % (self.x, self.y, self.z)
 
@@ -117,6 +123,9 @@ class FakeEditBone:
         self.tail = None
         self.roll = 0.0
         self.parent = None
+        self.use_deform = True
+        self.use_connect = False
+        self.show_wire = False
 
     @property
     def vector(self):
@@ -136,6 +145,9 @@ class FakeEditBones:
         b = FakeEditBone(name)
         self._items.append(b)
         return b
+
+    def remove(self, b):
+        self._items.remove(b)
 
     def get(self, name):
         for b in self._items:
@@ -159,14 +171,61 @@ class FakeEditBones:
 class FakeBone:
     def __init__(self, name):
         self.name = name
+        self.hide = False
+
+
+class FakeBoneList:
+    def __init__(self, items=None):
+        self._items = items or []
+
+    def get(self, name):
+        for b in self._items:
+            if b.name == name:
+                return b
+        return None
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
 
 
 class FakeArmature:
     def __init__(self, name):
         self.name = name
         self.edit_bones = FakeEditBones(self)
-        self.bones = []
+        self.bones = FakeBoneList()
         self.users_obj = None
+
+
+class FakeConstraint:
+    def __init__(self, ctype):
+        self.type = ctype
+        self.name = ctype
+        self.influence = 1.0
+        self.subtarget = ""
+        self.target = None
+        self.chain_count = 0
+
+
+class FakeConstraints:
+    def __init__(self):
+        self._items = []
+
+    def new(self, ctype):
+        c = FakeConstraint(ctype)
+        self._items.append(c)
+        return c
+
+    def remove(self, c):
+        self._items.remove(c)
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
 
 
 class FakePoseBone:
@@ -175,22 +234,62 @@ class FakePoseBone:
         self.rotation_mode = "XYZ"
         self.location = (0.0, 0.0, 0.0)
         self.matrix = None
+        self.constraints = FakeConstraints()
+        self.select = False
+
+
+class FakePoseBones:
+    def __init__(self, items=None):
+        self._items = items or []
+        self.active = None
+
+    def get(self, name):
+        for b in self._items:
+            if b.name == name:
+                return b
+        return None
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self):
+        return len(self._items)
 
 
 class FakeArmObj:
     def __init__(self, name, data):
         self.name = name
         self.data = data
+        self.type = "ARMATURE"
         data.users_obj = self
-        self.pose = types.SimpleNamespace(bones=[])
+        self.pose = types.SimpleNamespace(bones=FakePoseBones())
         self.matrix_world = FakeMatrix4()
         self.location = (0.0, 0.0, 0.0)
         self.select_set = lambda flag: None
+        self.show_in_front = False
+        self._props = {}
+
+    # custom props (arm["ncp_height"] = ...; arm.get(...))
+    def __getitem__(self, k):
+        return self._props[k]
+
+    def __setitem__(self, k, v):
+        self._props[k] = v
+
+    def __delitem__(self, k):
+        del self._props[k]
+
+    def __contains__(self, k):
+        return k in self._props
+
+    def get(self, k, default=None):
+        return self._props.get(k, default)
 
     def finalize(self):
-        self.data.bones = [FakeBone(eb.name) for eb in
-                           self.data.edit_bones]
-        self.pose.bones = [FakePoseBone(b.name) for b in self.data.bones]
+        self.data.bones = FakeBoneList(
+            [FakeBone(eb.name) for eb in self.data.edit_bones])
+        self.pose.bones = FakePoseBones(
+            [FakePoseBone(b.name) for b in self.data.bones])
 
 
 class FakeVerts:
@@ -411,6 +510,7 @@ sys.path.insert(0, ADDON)
 import neuro_rig  # noqa: E402
 import neuro_autorig  # noqa: E402
 import neuro_creature as nc  # noqa: E402
+import neuro_controls as nctl  # noqa: E402
 import ncp_comfy  # noqa: E402
 
 import numpy as np  # noqa: E402
@@ -504,7 +604,7 @@ def _np_in_functions(path):
 shadow_total = {}
 for mod in ("__init__.py", "ncp_comfy.py", "ncp_img3d.py",
             "ncp_muscles.py", "neuro_rig.py", "neuro_autorig.py",
-            "neuro_creature.py"):
+            "neuro_creature.py", "neuro_controls.py"):
     bad = _np_in_functions(os.path.join(ADDON, mod))
     shadow_total[mod] = bad
     check("AST: нет import numpy внутри функций — %s" % mod,
@@ -788,6 +888,159 @@ try:
 except nc.CreatureError:
     check("HUMAN на четвероногом -> CreatureError", True)
 
+# =========================== H. слой рычагов (neuro_controls)
+# arm из секции B: human-контракт 18 костей + 20 пальцев
+
+rep = nctl.build_controls(arm, ik_on=True, hide_deform=False)
+check("controls: отчёт не пуст", bool(rep), rep)
+check("controls: отчёт упоминает 7 рычагов", "рычаги: 7" in rep, rep)
+hn = nctl.handle_names(arm)
+for nm in ("CTRL_Root", "CTRL_Body", "CTRL_Head", "CTRL_Arm_L",
+           "CTRL_Arm_R", "CTRL_Foot_L", "CTRL_Foot_R"):
+    check("controls: %s создан" % nm, nm in hn, hn)
+check("controls: у human ровно 7 рычагов", len(hn) == 7, hn)
+
+eb_pelvis = arm.data.edit_bones.get("pelvis")
+check("controls: pelvis parented to CTRL_Body",
+      eb_pelvis is not None and eb_pelvis.parent is not None and
+      eb_pelvis.parent.name == "CTRL_Body")
+eb_croot = arm.data.edit_bones.get("CTRL_Root")
+eb_cbody = arm.data.edit_bones.get("CTRL_Body")
+check("controls: CTRL_Root без родителя, CTRL_Body <- Root",
+      eb_croot is not None and eb_croot.parent is None and
+      eb_cbody is not None and eb_cbody.parent is eb_croot)
+check("controls: CTRL кости use_deform=False",
+      eb_croot.use_deform is False and
+      arm.data.edit_bones.get("CTRL_Foot_L").use_deform is False)
+check("controls: deform кости не тронуты (use_deform=True)",
+      arm.data.edit_bones.get("thigh_L").use_deform is True)
+
+
+def _pb(arm_obj, name):
+    return arm_obj.pose.bones.get(name)
+
+
+c_farm = [c for c in _pb(arm, "farm_L").constraints if c.type == "IK"]
+check("controls: farm_L IK -> CTRL_Arm_L (chain 2)",
+      len(c_farm) == 1 and c_farm[0].subtarget == "CTRL_Arm_L" and
+      c_farm[0].chain_count == 2,
+      [(c.name, c.subtarget, c.chain_count) for c in c_farm])
+c_shin = [c for c in _pb(arm, "shin_L").constraints if c.type == "IK"]
+check("controls: shin_L IK -> CTRL_Foot_L (chain 2)",
+      len(c_shin) == 1 and c_shin[0].subtarget == "CTRL_Foot_L" and
+      c_shin[0].chain_count == 2)
+c_rot = [c for c in _pb(arm, "foot_L").constraints
+         if c.type == "COPY_ROTATION"]
+check("controls: foot_L COPY_ROTATION -> CTRL_Foot_L",
+      len(c_rot) == 1 and c_rot[0].subtarget == "CTRL_Foot_L")
+c_head = [c for c in _pb(arm, "head").constraints if c.type == "IK"]
+check("controls: head IK -> CTRL_Head (chain 1)",
+      len(c_head) == 1 and c_head[0].subtarget == "CTRL_Head" and
+      c_head[0].chain_count == 1)
+check("controls: у pelvis нет констрейнтов (анимация чистая)",
+      len(_pb(arm, "pelvis").constraints) == 0)
+n_cons = sum(1 for pb in arm.pose.bones
+             for c in pb.constraints if c.name.startswith("NCP_"))
+check("controls: 7 констрейнтов NCP_* (4 IK + 2 ROT + 1 head)",
+      n_cons == 7, n_cons)
+check("controls: influence = 1 при ik_on=True", nctl.ik_on(arm))
+
+nctl.set_ik(arm, False)
+check("controls: set_ik(False) гасит influence",
+      all(float(c.influence) == 0.0
+          for pb in arm.pose.bones for c in pb.constraints
+          if c.name.startswith("NCP_")) and not nctl.ik_on(arm))
+nctl.set_ik(arm, True)
+check("controls: set_ik(True) включает",
+      nctl.ik_on(arm) and
+      all(float(c.influence) == 1.0
+          for pb in arm.pose.bones for c in pb.constraints
+          if c.name.startswith("NCP_")))
+
+nctl.set_deform_hidden(arm, True)
+check("controls: deform скрыты, CTRL видимы",
+      arm.data.bones.get("thigh_L").hide is True and
+      arm.data.bones.get("CTRL_Foot_L").hide is False)
+nctl.set_deform_hidden(arm, False)
+check("controls: show обратно",
+      arm.data.bones.get("thigh_L").hide is False)
+
+# пересборка: старые рычаги удалены, дубликатов нет, IK по флагу
+rep2 = nctl.build_controls(arm, ik_on=False, hide_deform=True)
+hn2 = nctl.handle_names(arm)
+check("controls: пересборка — те же 7 рычагов",
+      sorted(hn2) == sorted(hn), hn2)
+check("controls: пересборка — IK выключен", not nctl.ik_on(arm))
+check("controls: пересборка — deform скрыты",
+      arm.data.bones.get("thigh_L").hide is True and
+      arm.data.bones.get("farm_L").hide is True)
+nctl.set_deform_hidden(arm, False)
+# пальцы не получили рычагов и не попали в IK-цепи
+check("controls: у пальцев нет констрейнтов",
+      not any(pb.name.startswith("fng_") and len(pb.constraints)
+              for pb in arm.pose.bones))
+sel = nctl.select_handles(bpy.context, arm)
+check("controls: select_handles выделил 7 и только CTRL",
+      sorted(sel) == sorted(hn) and
+      all(pb.select == pb.name.startswith("CTRL_")
+          for pb in arm.pose.bones))
+
+# ---- creature-планы: рычаги по факту цепочек
+arm_b2 = neuro_rig.build_armature(res_b["spec"], name="BipedArm")
+_mode_set("OBJECT")
+nctl.build_controls(arm_b2, ik_on=True)
+hn_b = nctl.handle_names(arm_b2)
+check("controls biped: Foot/Arm/Head по имени",
+      all(n in hn_b for n in ("CTRL_Foot_L", "CTRL_Foot_R", "CTRL_Arm_L",
+                              "CTRL_Arm_R", "CTRL_Head")), hn_b)
+c_a4 = [c for c in _pb(arm_b2, "arm_L_4").constraints if c.type == "IK"]
+check("controls biped: кончик руки arm_L_4 IK (chain 3)",
+      len(c_a4) == 1 and c_a4[0].subtarget == "CTRL_Arm_L" and
+      c_a4[0].chain_count == 3)
+c_ll = [c for c in _pb(arm_b2, "leg_L_lower").constraints
+        if c.type == "IK"]
+check("controls biped: leg_L_lower IK -> CTRL_Foot_L",
+      len(c_ll) == 1 and c_ll[0].subtarget == "CTRL_Foot_L")
+
+arm_q = neuro_rig.build_armature(res_q["spec"], name="QuadArm")
+_mode_set("OBJECT")
+rep_q = nctl.build_controls(arm_q, ik_on=True)
+hn_q = nctl.handle_names(arm_q)
+check("controls quad: 4 ноги front/hind L/R",
+      all(n in hn_q for n in ("CTRL_Foot_front_L", "CTRL_Foot_front_R",
+                              "CTRL_Foot_hind_L", "CTRL_Foot_hind_R")),
+      hn_q)
+check("controls quad: Root/Body/Head/Tail",
+      all(n in hn_q for n in ("CTRL_Root", "CTRL_Body", "CTRL_Head",
+                              "CTRL_Tail")), hn_q)
+check("controls quad: у четвероногого 8 рычагов", len(hn_q) == 8, hn_q)
+c_t3 = [c for c in _pb(arm_q, "tail_3").constraints if c.type == "IK"]
+check("controls quad: хвост tail_3 IK -> CTRL_Tail",
+      len(c_t3) == 1 and c_t3[0].subtarget == "CTRL_Tail" and
+      c_t3[0].chain_count == 3)
+c_fl = [c for c in _pb(arm_q, "leg_front_L_lower").constraints
+        if c.type == "IK"]
+check("controls quad: leg_front_L_lower IK -> CTRL_Foot_front_L",
+      len(c_fl) == 1 and c_fl[0].subtarget == "CTRL_Foot_front_L")
+
+arm_d = neuro_rig.build_armature(res_d["spec"], name="DragonArm")
+_mode_set("OBJECT")
+nctl.build_controls(arm_d, ik_on=True)
+hn_d = nctl.handle_names(arm_d)
+check("controls dragon: крылья CTRL_Wing_L/R",
+      all(n in hn_d for n in ("CTRL_Wing_L", "CTRL_Wing_R")), hn_d)
+c_w = [c for c in _pb(arm_d, "wing_L_4").constraints if c.type == "IK"]
+check("controls dragon: wing_L_4 IK -> CTRL_Wing_L (chain 3)",
+      len(c_w) == 1 and c_w[0].subtarget == "CTRL_Wing_L" and
+      c_w[0].chain_count == 3)
+c_hd = [c for c in _pb(arm_d, "head").constraints if c.type == "IK"]
+check("controls dragon: шея+голова в IK головы (chain 3)",
+      len(c_hd) == 1 and c_hd[0].subtarget == "CTRL_Head" and
+      c_hd[0].chain_count == 3)
+# косметика не роняет сборку: custom shapes в стабе нет — ок
+check("controls dragon: всего 10 рычагов (4 ноги, крылья, хвост, шея)",
+      len(hn_d) == 10, hn_d)
+
 # ================================== E. инвариантность к yaw, face_rotation
 res0 = nc.analyze(build_human_t(), base_spec=spec18)
 pts37 = rotz(build_human_t(), 37.0)
@@ -831,17 +1084,21 @@ pkg = importlib.util.module_from_spec(spec_imp)
 sys.modules["neuro_character_pipeline"] = pkg
 spec_imp.loader.exec_module(pkg)
 
-check("bl_info version 2.6.0", pkg.bl_info["version"] == (2, 6, 0),
+check("bl_info version 2.7.0", pkg.bl_info["version"] == (2, 7, 0),
       pkg.bl_info["version"])
 cls_names = [c.__name__ for c in pkg.classes]
 check("NCP_OT_build_skeleton зарегистрирован",
       "NCP_OT_build_skeleton" in cls_names)
 panels = [n for n in cls_names if n.startswith("NCP_PT_")]
-check("10 панелей", len(panels) == 10, panels)
+check("11 панелей", len(panels) == 11, panels)
+check("панель рычагов NCP_PT_handles есть",
+      "NCP_PT_handles" in panels and "NCP_OT_select_handles" in cls_names
+      and "NCP_OT_rebuild_handles" in cls_names)
 check("AddonPreferences класс есть", "NCP_AddonPrefs" in cls_names)
 ann = getattr(pkg.NCP_Props, "__annotations__", {})
 for p in ("auto_rig", "body_plan", "add_fingers", "orient_auto",
-          "mesh_rot_x", "mesh_rot_z", "debug_landmarks"):
+          "mesh_rot_x", "mesh_rot_z", "debug_landmarks",
+          "ctrl_ik", "ctrl_hide_deform"):
     check("prop NCP_Props.%s" % p, p in ann)
 bp = ann.get("body_plan")
 bp_ids = [it[0] for it in bp.kwargs["items"]] if isinstance(bp, _PropStub) \
@@ -851,10 +1108,13 @@ check("Body plan enum: AUTO/HUMAN/QUADRUPED/WINGED_QUAD/BIRD/DRAGON",
                       "BIRD", "DRAGON"}, bp_ids)
 with open(os.path.join(ADDON, "blender_manifest.toml"), "rb") as f:
     man = tomllib.load(f)
-check("manifest version 2.6.0", man["version"] == "2.6.0",
+check("manifest version 2.7.0", man["version"] == "2.7.0",
       man["version"])
 with open(os.path.join(ADDON, "INSTALL_RU.txt"), encoding="utf-8") as f:
     install_txt = f.read()
+check("INSTALL_RU: секция 2.7.0 (рычаги)",
+      "ЧТО НОВОГО В 2.7.0" in install_txt and
+      "рычаг" in install_txt.lower())
 check("INSTALL_RU: секция 2.6.0", "ЧТО НОВОГО В 2.6.0" in install_txt)
 check("INSTALL_RU: секция про пальцы/поворот (2.5.0)",
       "ЧТО НОВОГО В 2.5.0" in install_txt)

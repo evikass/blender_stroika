@@ -11,7 +11,7 @@ URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слета
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 6, 0),
+    "version": (2, 7, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -41,6 +41,7 @@ if "ncp_comfy" in locals():  # reload при правках в текст-ред
     importlib.reload(neuro_rig)
     importlib.reload(neuro_autorig)
     importlib.reload(neuro_creature)
+    importlib.reload(neuro_controls)
 else:
     from . import ncp_comfy
     from . import ncp_img3d
@@ -48,6 +49,7 @@ else:
     from . import neuro_rig
     from . import neuro_autorig
     from . import neuro_creature
+    from . import neuro_controls
 
 
 # ------------------------------------------------------------ состояние
@@ -271,6 +273,23 @@ def _clear_old_rig():
     bpy.data.objects.remove(old)
 
 
+def _add_controls(context, arm):
+    """Слой рычагов поверх готового рига. Неудача не роняет скелет.
+    Возвращает короткую заметку для статус-карточки (или "")."""
+    st = _st(context)
+    try:
+        return neuro_controls.build_controls(
+            arm, ik_on=bool(st.ctrl_ik),
+            hide_deform=bool(st.ctrl_hide_deform))
+    except Exception as e:
+        try:
+            st.status += " | рычаги не построились (%s: %s)" \
+                % (type(e).__name__, e)
+        except Exception:
+            pass
+        return ""
+
+
 def _build_rig(context, mesh):
     st = _st(context)
     if bpy.data.objects.get("NeuroCharacter") is not None:
@@ -308,6 +327,7 @@ def _build_rig(context, mesh):
         mesh, spec, rot_x_deg=rot_x, rot_z_deg=rot_z,
         do_apply=st.apply_transforms)
     neuro_rig.skin_mesh_to_armature(mesh, arm)
+    _add_controls(context, arm)
     if st.orient_auto and (abs(rot_x) > 1e-6 or abs(rot_z) > 1e-6):
         _st(context).status = ("Меш повёрнут (авто): X%+g°, Z%+g° — "
                                "если смотрит назад, поставьте rot Z = -90"
@@ -356,6 +376,7 @@ def _build_rig_auto(context, mesh, spec, rot_x, rot_z):
         if res["notes"]:
             arm["ncp_notes"] = "; ".join(res["notes"])
     neuro_rig.skin_mesh_to_armature(mesh, arm)
+    ctrl_note = _add_controls(context, arm)
     if st.debug_landmarks:
         neuro_creature.make_landmarks(res["joints"], res["h"])
     note = ""
@@ -365,6 +386,8 @@ def _build_rig_auto(context, mesh, spec, rot_x, rot_z):
         if abs(rot_z) > 1e-6:
             note += ("; довернут лицом к +X (rot Z %+g — для "
                      "нейроанимации)" % rot_z)
+    if ctrl_note:
+        note += "; " + ctrl_note
     st.status = res["report"] + note
     return arm
 
@@ -510,6 +533,28 @@ def _refresh_scene():
             area.tag_redraw()
 
 
+def _ctrl_ik_update(self, context):
+    """Галка IK-рычагов: influence констрейнтов NCP_* на риге."""
+    arm = bpy.data.objects.get("NeuroCharacter")
+    if arm is None:
+        return
+    try:
+        neuro_controls.set_ik(arm, bool(self.ctrl_ik))
+    except Exception:
+        pass
+
+
+def _ctrl_hide_update(self, context):
+    """Галка «только рычаги»: спрятать остовные кости скелета."""
+    arm = bpy.data.objects.get("NeuroCharacter")
+    if arm is None:
+        return
+    try:
+        neuro_controls.set_deform_hidden(arm, bool(self.ctrl_hide_deform))
+    except Exception:
+        pass
+
+
 class NCP_Props(bpy.types.PropertyGroup):
     # --- шаг 1: эскиз
     sketch_path: StringProperty(
@@ -645,6 +690,19 @@ class NCP_Props(bpy.types.PropertyGroup):
                     "пальцы ищутся по геометрии кисти/лапы. neurosim "
                     "анимирует только основные кости, пальцы едут "
                     "вместе с рукой")
+    ctrl_ik: BoolProperty(
+        name="IK handles", default=True,
+        update=_ctrl_ik_update,
+        description="Рычаги рук/ног/крыльев двигают конечности через "
+                    "IK. Выключите, чтобы нейроанимация играла как "
+                    "записана (Import Neuro Motion выключает сам); Root "
+                    "и Body двигают персонажа и без IK")
+    ctrl_hide_deform: BoolProperty(
+        name="Hide skeleton bones", default=False,
+        update=_ctrl_hide_update,
+        description="Спрятать остовные кости скелета — в вьюпорте "
+                    "остаются только крупные рычаги; они не деформируют "
+                    "меш и анимации не мешают")
     # --- шаг 5: мышцы
     muscle_style: EnumProperty(
         name="Style",
@@ -954,6 +1012,61 @@ class NCP_OT_build_skeleton(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class NCP_OT_select_handles(bpy.types.Operator):
+    bl_idname = "ncp.select_handles"
+    bl_label = "Select Handles"
+    bl_description = ("Выделить все рычаги и включить Pose mode: тяните "
+                      "рычаг мышью — персонаж двигается")
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bpy.data.objects.get("NeuroCharacter") is not None
+
+    def execute(self, context):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        if arm is None:
+            return {"CANCELLED"}
+        names = neuro_controls.select_handles(context, arm)
+        if not names:
+            self.report({"ERROR"}, "На скелете нет рычагов — "
+                                   "нажмите Rebuild Handles")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Рычаги выделены: %d" % len(names))
+        return {"FINISHED"}
+
+
+class NCP_OT_rebuild_handles(bpy.types.Operator):
+    bl_idname = "ncp.rebuild_handles"
+    bl_label = "Rebuild Handles"
+    bl_description = ("Пересобрать слой рычагов на текущем скелете "
+                      "(например, если риг построен старой версией "
+                      "аддона без рычагов)")
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        return arm is not None and arm.type == "ARMATURE"
+
+    def execute(self, context):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        st = _st(context)
+        try:
+            note = neuro_controls.build_controls(
+                arm, ik_on=bool(st.ctrl_ik),
+                hide_deform=bool(st.ctrl_hide_deform))
+        except Exception as e:
+            _fail(context, "Рычаги: %s: %s" % (type(e).__name__, e))
+            self.report({"ERROR"}, "%s: %s" % (type(e).__name__, e))
+            return {"CANCELLED"}
+        st.status = (st.status or "").split(" | рычаги")[0]
+        if note:
+            st.status = (st.status + "; " + note) if st.status else note
+        self.report({"INFO"}, note or "Рычаги пересобраны")
+        return {"FINISHED"}
+
+
 class NCP_OT_add_muscles(bpy.types.Operator):
     bl_idname = "ncp.add_muscles"
     bl_label = "Add Muscles"
@@ -1093,6 +1206,18 @@ class NCP_OT_import_motion(bpy.types.Operator, ImportHelper):
                     payload["spec"], name="NeuroCharacter")
             n, fps = neuro_rig.apply_motion_to_armature(
                 arm, payload, frame_step=st.frame_step)
+            # рычаги: построить, если их нет; IK гасим — записанное
+            # движение важнее (рычаги не должны мешать анимации)
+            if not neuro_controls.has_handles(arm):
+                try:
+                    neuro_controls.build_controls(
+                        arm, ik_on=False,
+                        hide_deform=bool(st.ctrl_hide_deform))
+                except Exception:
+                    pass
+            else:
+                neuro_controls.set_ik(arm, False)
+            st.ctrl_ik = False
             if st.build_world and payload.get("world"):
                 neuro_rig.add_ground()
                 neuro_rig.build_world_props(payload["world"])
@@ -1214,8 +1339,8 @@ def _build_env_report(context):
     add("== зарегистрированные классы ==")
     for t in ("NCP_PT_status", "NCP_PT_pipeline", "NCP_PT_sketch",
               "NCP_PT_image", "NCP_PT_mesh", "NCP_PT_rig",
-              "NCP_PT_muscles", "NCP_PT_anim", "NCP_PT_settings",
-              "NCP_PT_scene", "NCP_Props"):
+              "NCP_PT_handles", "NCP_PT_muscles", "NCP_PT_anim",
+              "NCP_PT_settings", "NCP_PT_scene", "NCP_Props"):
         add("  %-16s %s" % (t, "есть" if hasattr(bpy.types, t) else "НЕТ"))
     scn = getattr(bpy.context, "scene", None)
     st = getattr(scn, "ncp", None)
@@ -1678,6 +1803,35 @@ class NCP_PT_rig(_NCPSubPanel):
                    "лицом к +X (нужно нейроанимации)")
 
 
+class NCP_PT_handles(_NCPSubPanel):
+    bl_label = "4b · Control Handles"
+    bl_idname = "NCP_PT_handles"
+
+    @classmethod
+    def poll(cls, context):
+        return bpy.data.objects.get("NeuroCharacter") is not None
+
+    def _head(self, context):
+        self.layout.label(icon="CON_KINEMATIC")
+
+    def _content(self, context):
+        st = context.scene.ncp
+        lay = self.layout
+        lay.prop(st, "ctrl_ik")
+        lay.prop(st, "ctrl_hide_deform")
+        row = lay.row(align=True)
+        row.operator("ncp.select_handles", text="Select Handles",
+                     icon="RESTRICT_SELECT_OFF")
+        row.operator("ncp.rebuild_handles", text="Rebuild",
+                     icon="FILE_REFRESH")
+        _hint(lay, "Тяните рычаг мышью: Root — весь персонаж, Body — "
+                   "корпус (голова/хвост/крылья вместе), Foot/Arm — "
+                   "конечности через IK")
+        _hint(lay, "Рычаги не деформируют меш и в костях не анимируются. "
+                   "Для нейроанимации выключите IK — или импортируйте "
+                   "движение: он выключит IK сам")
+
+
 class NCP_PT_muscles(_NCPSubPanel):
     bl_label = "5 · Muscles (X-Muscle)"
     bl_idname = "NCP_PT_muscles"
@@ -1870,6 +2024,8 @@ classes = (
     NCP_OT_start_comfy,
     NCP_OT_env_report,
     NCP_OT_build_skeleton,
+    NCP_OT_select_handles,
+    NCP_OT_rebuild_handles,
     NCP_OT_add_muscles,
     NCP_OT_attach_muscles,
     NCP_OT_bake_muscles,
@@ -1883,6 +2039,7 @@ classes = (
     NCP_PT_image,
     NCP_PT_mesh,
     NCP_PT_rig,
+    NCP_PT_handles,
     NCP_PT_muscles,
     NCP_PT_anim,
     NCP_PT_settings,
