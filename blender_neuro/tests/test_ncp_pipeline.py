@@ -116,6 +116,19 @@ class FakeQuaternion:
         return FakeMatrix4()
 
 
+class FakeMatrix3:
+    """3x3-рамка кости: .col — оси X/Y/Z (Y вдоль кости)."""
+
+    def __init__(self, x, y, z):
+        self.col = (x, y, z)
+
+
+def _stub_cross(a, b):
+    return FakeVector(a.y * b.z - a.z * b.y,
+                      a.z * b.x - a.x * b.z,
+                      a.x * b.y - a.y * b.x)
+
+
 class FakeEditBone:
     def __init__(self, name):
         self.name = name
@@ -134,6 +147,22 @@ class FakeEditBone:
     @property
     def length(self):
         return (self.tail - self.head).length
+
+    @property
+    def matrix(self):
+        """Рамка кости как у Blender (roll=0): Y вдоль кости, X =
+        Y x ref (для вертикальной кости X = +X мира)."""
+        v = self.tail - self.head
+        if v.length < 1e-9:
+            y = FakeVector(0.0, 0.0, 1.0)
+        else:
+            y = v.normalized()
+        ref = FakeVector(0.0, 1.0, 0.0) if abs(y.y) < 0.9 \
+            else FakeVector(0.0, 0.0, 1.0)
+        x = _stub_cross(y, ref)
+        x = x.normalized() if x.length > 1e-9 else FakeVector(1.0, 0.0, 0.0)
+        z = _stub_cross(x, y)
+        return FakeMatrix3(x, y, z)
 
 
 class FakeEditBones:
@@ -894,11 +923,42 @@ except nc.CreatureError:
 rep = nctl.build_controls(arm, ik_on=True, hide_deform=False)
 check("controls: отчёт не пуст", bool(rep), rep)
 check("controls: отчёт упоминает 7 рычагов", "рычаги: 7" in rep, rep)
+check("controls: отчёт — 4 полюса + 10 пальцев + 8 хелперов",
+      "полюсов: 4" in rep and "пальцев: 10" in rep and
+      "IK-хелперов: 8" in rep, rep)
 hn = nctl.handle_names(arm)
 for nm in ("CTRL_Root", "CTRL_Body", "CTRL_Head", "CTRL_Arm_L",
            "CTRL_Arm_R", "CTRL_Foot_L", "CTRL_Foot_R"):
     check("controls: %s создан" % nm, nm in hn, hn)
-check("controls: у human ровно 7 рычагов", len(hn) == 7, hn)
+# 7 главных + 4 полюса + 10 пальцев
+check("controls: у human 21 CTRL-кость (7+4 полюса+10 пальцев)",
+      len(hn) == 21, hn)
+for nm in ("CTRL_Pole_Knee_L", "CTRL_Pole_Knee_R",
+           "CTRL_Pole_Elbow_L", "CTRL_Pole_Elbow_R"):
+    check("controls: полюс %s" % nm, nm in hn, hn)
+fing = sorted(n for n in hn if n.startswith("CTRL_Finger_"))
+check("controls: 10 рычагов пальцев, имена человеческие",
+      len(fing) == 10 and "CTRL_Finger_thumb_L" in fing and
+      "CTRL_Finger_index_R" in fing, fing[:4])
+
+# полюс колена: у головы голени, смотрит вперёд (+X)
+eb_knee = arm.data.edit_bones.get("CTRL_Pole_Knee_L")
+eb_shin = arm.data.edit_bones.get("shin_L")
+check("controls: полюс колена у головы голени, смотрит вперёд (+X)",
+      eb_knee is not None and eb_shin is not None and
+      abs(eb_knee.head.x - eb_shin.head.x) < 1e-6 and
+      abs(eb_knee.head.z - eb_shin.head.z) < 1e-6 and
+      eb_knee.tail.x > eb_knee.head.x + 0.05,
+      (eb_knee.head, eb_knee.tail) if eb_knee else None)
+
+# рычаг ступни: ХВОСТ в голеностопе (голова foot_L)
+eb_foot = arm.data.edit_bones.get("CTRL_Foot_L")
+eb_foot_b = arm.data.edit_bones.get("foot_L")
+check("controls: хвост CTRL_Foot_L в голеностопе",
+      eb_foot is not None and eb_foot_b is not None and
+      abs(eb_foot.tail.x - eb_foot_b.head.x) < 1e-6 and
+      abs(eb_foot.tail.z - eb_foot_b.head.z) < 1e-6,
+      (eb_foot.tail, eb_foot_b.head) if eb_foot else None)
 
 eb_pelvis = arm.data.edit_bones.get("pelvis")
 check("controls: pelvis parented to CTRL_Body",
@@ -920,33 +980,89 @@ def _pb(arm_obj, name):
     return arm_obj.pose.bones.get(name)
 
 
-c_farm = [c for c in _pb(arm, "farm_L").constraints if c.type == "IK"]
-check("controls: farm_L IK -> CTRL_Arm_L (chain 2)",
-      len(c_farm) == 1 and c_farm[0].subtarget == "CTRL_Arm_L" and
-      c_farm[0].chain_count == 2,
-      [(c.name, c.subtarget, c.chain_count) for c in c_farm])
-c_shin = [c for c in _pb(arm, "shin_L").constraints if c.type == "IK"]
-check("controls: shin_L IK -> CTRL_Foot_L (chain 2)",
-      len(c_shin) == 1 and c_shin[0].subtarget == "CTRL_Foot_L" and
-      c_shin[0].chain_count == 2)
+c_farmh = [c for c in _pb(arm, "NCPK_Arm_L_2").constraints
+           if c.type == "IK"]
+check("controls: IK руки на хелпере NCPK_Arm_L_2 (chain 2, use_tail)",
+      len(c_farmh) == 1 and c_farmh[0].subtarget == "CTRL_Arm_L" and
+      c_farmh[0].chain_count == 2 and
+      getattr(c_farmh[0], "use_tail", True) is True,
+      [(c.name, c.subtarget, c.chain_count) for c in c_farmh])
+check("controls: IK руки имеет полюс локтя",
+      c_farmh[0].pole_target == arm and
+      c_farmh[0].pole_subtarget == "CTRL_Pole_Elbow_L" and
+      isinstance(c_farmh[0].pole_angle, float),
+      (c_farmh[0].pole_subtarget, c_farmh[0].pole_angle))
+# хелпер плечо-локоть вдоль +Y, roll=0, сгиб назад (-X): theta=±180°
+check("controls: полюс локтя ~ 180° (сгиб назад)",
+      abs(abs(c_farmh[0].pole_angle) - math.pi) < 1e-6,
+      c_farmh[0].pole_angle)
+# хелперы натянуты сустав-в-сустав (плечо->локоть, локоть->запястье)
+eb_h1 = arm.data.edit_bones.get("NCPK_Arm_L_1")
+eb_uarm = arm.data.edit_bones.get("uarm_L")
+eb_farm = arm.data.edit_bones.get("farm_L")
+check("controls: NCPK_Arm_L_1 = плечо->локоть (настоящая длина)",
+      eb_h1 is not None and eb_uarm is not None and eb_farm is not None and
+      abs(eb_h1.head.x - eb_uarm.head.x) < 1e-6 and
+      abs(eb_h1.tail.x - eb_farm.head.x) < 1e-6 and
+      eb_h1.length > eb_uarm.length,
+      (eb_h1.head, eb_h1.tail) if eb_h1 else None)
+check("controls: NCPK_Arm_L_2 = локоть->запястье",
+      abs(eb_h1.tail.x - eb_farm.head.x) < 1e-6 and
+      abs(arm.data.edit_bones.get("NCPK_Arm_L_2").tail.x -
+          eb_farm.tail.x) < 1e-6)
+# остовные кости следуют за хелперами через COPY_TRANSFORMS
+ct_uarm = [c for c in _pb(arm, "uarm_L").constraints
+           if c.type == "COPY_TRANSFORMS"]
+check("controls: uarm_L COPY_TRANSFORMS -> NCPK_Arm_L_1",
+      len(ct_uarm) == 1 and ct_uarm[0].subtarget == "NCPK_Arm_L_1")
+ct_thigh = [c for c in _pb(arm, "thigh_L").constraints
+            if c.type == "COPY_TRANSFORMS"]
+check("controls: thigh_L COPY_TRANSFORMS -> NCPK_Foot_L_1",
+      len(ct_thigh) == 1 and ct_thigh[0].subtarget == "NCPK_Foot_L_1")
+c_shinh = [c for c in _pb(arm, "NCPK_Foot_L_2").constraints
+           if c.type == "IK"]
+check("controls: IK ноги на хелпере NCPK_Foot_L_2 -> CTRL_Foot_L",
+      len(c_shinh) == 1 and c_shinh[0].subtarget == "CTRL_Foot_L" and
+      c_shinh[0].chain_count == 2)
+check("controls: IK ноги имеет полюс колена (прямая нога: 0°)",
+      c_shinh[0].pole_subtarget == "CTRL_Pole_Knee_L" and
+      abs(c_shinh[0].pole_angle) < 1e-6,
+      (c_shinh[0].pole_subtarget, c_shinh[0].pole_angle))
+check("controls: у shin_L нет IK (только COPY_TRANSFORMS)",
+      not any(c.type == "IK" for c in _pb(arm, "shin_L").constraints))
 c_rot = [c for c in _pb(arm, "foot_L").constraints
          if c.type == "COPY_ROTATION"]
 check("controls: foot_L COPY_ROTATION -> CTRL_Foot_L",
       len(c_rot) == 1 and c_rot[0].subtarget == "CTRL_Foot_L")
 c_head = [c for c in _pb(arm, "head").constraints if c.type == "IK"]
-check("controls: head IK -> CTRL_Head (chain 1)",
+check("controls: head IK -> CTRL_Head (chain 1, без полюса)",
       len(c_head) == 1 and c_head[0].subtarget == "CTRL_Head" and
-      c_head[0].chain_count == 1)
+      c_head[0].chain_count == 1 and
+      getattr(c_head[0], "pole_subtarget", "") == "")
+# пальцы: IK на последнем сегменте цепочки (кончик тянется к рычагу)
+c_fng = [c for c in _pb(arm, "fng_thumb_2_L").constraints
+         if c.type == "IK"]
+check("controls: fng_thumb_2_L IK -> CTRL_Finger_thumb_L (chain 2)",
+      len(c_fng) == 1 and c_fng[0].subtarget == "CTRL_Finger_thumb_L" and
+      c_fng[0].chain_count == 2 and
+      getattr(c_fng[0], "use_tail", True) is True,
+      [(c.name, c.subtarget) for c in c_fng])
+n_fng_ik = sum(1 for pb in arm.pose.bones
+               if pb.name.startswith("fng_") and
+               any(c.type == "IK" and c.name.startswith("NCP_")
+                   for c in pb.constraints))
+check("controls: все 10 пальцев имеют IK на свой рычаг",
+      n_fng_ik == 10, n_fng_ik)
 check("controls: у pelvis нет констрейнтов (анимация чистая)",
       len(_pb(arm, "pelvis").constraints) == 0)
 n_cons = sum(1 for pb in arm.pose.bones
              for c in pb.constraints if c.name.startswith("NCP_"))
-check("controls: 7 констрейнтов NCP_* (4 IK + 2 ROT + 1 head)",
-      n_cons == 7, n_cons)
+check("controls: 25 констрейнтов NCP_* (4 IK на хелперах, 8 CT, "
+      "1 IK головы, 10 IK пальцев, 2 ROT)", n_cons == 25, n_cons)
 check("controls: influence = 1 при ik_on=True", nctl.ik_on(arm))
 
 nctl.set_ik(arm, False)
-check("controls: set_ik(False) гасит influence",
+check("controls: set_ik(False) гасит influence (IK, CT и полюсы)",
       all(float(c.influence) == 0.0
           for pb in arm.pose.bones for c in pb.constraints
           if c.name.startswith("NCP_")) and not nctl.ik_on(arm))
@@ -956,6 +1072,8 @@ check("controls: set_ik(True) включает",
       all(float(c.influence) == 1.0
           for pb in arm.pose.bones for c in pb.constraints
           if c.name.startswith("NCP_")))
+n_reset = nctl.reset_helpers(arm)
+check("controls: reset_helpers сбросил 8 хелперов", n_reset == 8, n_reset)
 
 nctl.set_deform_hidden(arm, True)
 check("controls: deform скрыты, CTRL видимы",
@@ -968,39 +1086,59 @@ check("controls: show обратно",
 # пересборка: старые рычаги удалены, дубликатов нет, IK по флагу
 rep2 = nctl.build_controls(arm, ik_on=False, hide_deform=True)
 hn2 = nctl.handle_names(arm)
-check("controls: пересборка — те же 7 рычагов",
+check("controls: пересборка — те же 21 CTRL-кость",
       sorted(hn2) == sorted(hn), hn2)
 check("controls: пересборка — IK выключен", not nctl.ik_on(arm))
 check("controls: пересборка — deform скрыты",
       arm.data.bones.get("thigh_L").hide is True and
       arm.data.bones.get("farm_L").hide is True)
+nctl.build_controls(arm, ik_on=False, fingers=False, poles=False)
+check("controls: пересборка без полюсов/пальцев — только 7 главных",
+      sorted(nctl.handle_names(arm)) ==
+      sorted(n for n in hn
+             if not n.startswith(("CTRL_Finger_", "CTRL_Pole_"))),
+      nctl.handle_names(arm))
+nctl.build_controls(arm, ik_on=False)
 nctl.set_deform_hidden(arm, False)
-# пальцы не получили рычагов и не попали в IK-цепи
-check("controls: у пальцев нет констрейнтов",
-      not any(pb.name.startswith("fng_") and len(pb.constraints)
-              for pb in arm.pose.bones))
 sel = nctl.select_handles(bpy.context, arm)
-check("controls: select_handles выделил 7 и только CTRL",
-      sorted(sel) == sorted(hn) and
+check("controls: select_handles выделил все и только CTRL",
+      sorted(sel) == sorted(nctl.handle_names(arm)) and
       all(pb.select == pb.name.startswith("CTRL_")
           for pb in arm.pose.bones))
 
 # ---- creature-планы: рычаги по факту цепочек
 arm_b2 = neuro_rig.build_armature(res_b["spec"], name="BipedArm")
 _mode_set("OBJECT")
-nctl.build_controls(arm_b2, ik_on=True)
+rep_b = nctl.build_controls(arm_b2, ik_on=True)
 hn_b = nctl.handle_names(arm_b2)
 check("controls biped: Foot/Arm/Head по имени",
       all(n in hn_b for n in ("CTRL_Foot_L", "CTRL_Foot_R", "CTRL_Arm_L",
                               "CTRL_Arm_R", "CTRL_Head")), hn_b)
+# 7 главных + 2 полюса коленей + 10 пальцев (4-костные руки — без полюсов)
+check("controls biped: полюсы коленей есть, локтей нет",
+      "CTRL_Pole_Knee_L" in hn_b and
+      "CTRL_Pole_Elbow_L" not in hn_b, hn_b)
+check("controls biped: 19 CTRL-костей (7+2 полюса+10 пальцев)",
+      len(hn_b) == 19, hn_b)
 c_a4 = [c for c in _pb(arm_b2, "arm_L_4").constraints if c.type == "IK"]
-check("controls biped: кончик руки arm_L_4 IK (chain 3)",
+check("controls biped: кончик руки arm_L_4 IK (chain 3, без полюса)",
       len(c_a4) == 1 and c_a4[0].subtarget == "CTRL_Arm_L" and
-      c_a4[0].chain_count == 3)
+      c_a4[0].chain_count == 3 and
+      getattr(c_a4[0], "pole_subtarget", "") == "")
 c_ll = [c for c in _pb(arm_b2, "leg_L_lower").constraints
         if c.type == "IK"]
-check("controls biped: leg_L_lower IK -> CTRL_Foot_L",
-      len(c_ll) == 1 and c_ll[0].subtarget == "CTRL_Foot_L")
+check("controls biped: leg_L_lower IK -> CTRL_Foot_L с полюсом колена",
+      len(c_ll) == 1 and c_ll[0].subtarget == "CTRL_Foot_L" and
+      c_ll[0].pole_subtarget == "CTRL_Pole_Knee_L")
+c_fng_b = [c for c in _pb(arm_b2, "fng_arm_L_1_2").constraints
+           if c.type == "IK"]
+check("controls biped: палец fng_arm_L_1_2 -> CTRL_Finger_arm_L_1",
+      len(c_fng_b) == 1 and
+      c_fng_b[0].subtarget == "CTRL_Finger_arm_L_1", hn_b)
+check("controls biped: рычаг пальца parent к кисти",
+      arm_b2.data.edit_bones.get("CTRL_Finger_arm_L_1").parent is not None
+      and arm_b2.data.edit_bones.get(
+          "CTRL_Finger_arm_L_1").parent.name == "arm_L_4")
 
 arm_q = neuro_rig.build_armature(res_q["spec"], name="QuadArm")
 _mode_set("OBJECT")
@@ -1013,15 +1151,23 @@ check("controls quad: 4 ноги front/hind L/R",
 check("controls quad: Root/Body/Head/Tail",
       all(n in hn_q for n in ("CTRL_Root", "CTRL_Body", "CTRL_Head",
                               "CTRL_Tail")), hn_q)
-check("controls quad: у четвероногого 8 рычагов", len(hn_q) == 8, hn_q)
+# 8 главных + 4 полюса (все ноги 2-бонные) + 0 пальцев
+check("controls quad: 12 CTRL-костей (8+4 полюса)", len(hn_q) == 12, hn_q)
+check("controls quad: 4 полюса коленей front/hind",
+      all(n in hn_q for n in ("CTRL_Pole_Knee_front_L",
+                              "CTRL_Pole_Knee_front_R",
+                              "CTRL_Pole_Knee_hind_L",
+                              "CTRL_Pole_Knee_hind_R")), hn_q)
 c_t3 = [c for c in _pb(arm_q, "tail_3").constraints if c.type == "IK"]
-check("controls quad: хвост tail_3 IK -> CTRL_Tail",
+check("controls quad: хвост tail_3 IK -> CTRL_Tail (chain 3, без полюса)",
       len(c_t3) == 1 and c_t3[0].subtarget == "CTRL_Tail" and
-      c_t3[0].chain_count == 3)
+      c_t3[0].chain_count == 3 and
+      getattr(c_t3[0], "pole_subtarget", "") == "")
 c_fl = [c for c in _pb(arm_q, "leg_front_L_lower").constraints
         if c.type == "IK"]
 check("controls quad: leg_front_L_lower IK -> CTRL_Foot_front_L",
-      len(c_fl) == 1 and c_fl[0].subtarget == "CTRL_Foot_front_L")
+      len(c_fl) == 1 and c_fl[0].subtarget == "CTRL_Foot_front_L" and
+      c_fl[0].pole_subtarget == "CTRL_Pole_Knee_front_L")
 
 arm_d = neuro_rig.build_armature(res_d["spec"], name="DragonArm")
 _mode_set("OBJECT")
@@ -1038,8 +1184,11 @@ check("controls dragon: шея+голова в IK головы (chain 3)",
       len(c_hd) == 1 and c_hd[0].subtarget == "CTRL_Head" and
       c_hd[0].chain_count == 3)
 # косметика не роняет сборку: custom shapes в стабе нет — ок
-check("controls dragon: всего 10 рычагов (4 ноги, крылья, хвост, шея)",
-      len(hn_d) == 10, hn_d)
+# 10 главных + 4 полюса + пальцы крыльев (по факту спеки)
+n_fng_d = len([n for n in dn if n.startswith("fng_")])
+check("controls dragon: всего %d CTRL (10+4 полюса+%d пальцев)" % (
+        14 + n_fng_d // 2, n_fng_d // 2),
+      len(hn_d) == 14 + n_fng_d // 2, (len(hn_d), n_fng_d))
 
 # ================================== E. инвариантность к yaw, face_rotation
 res0 = nc.analyze(build_human_t(), base_spec=spec18)
@@ -1084,7 +1233,7 @@ pkg = importlib.util.module_from_spec(spec_imp)
 sys.modules["neuro_character_pipeline"] = pkg
 spec_imp.loader.exec_module(pkg)
 
-check("bl_info version 2.7.0", pkg.bl_info["version"] == (2, 7, 0),
+check("bl_info version 2.8.0", pkg.bl_info["version"] == (2, 8, 0),
       pkg.bl_info["version"])
 cls_names = [c.__name__ for c in pkg.classes]
 check("NCP_OT_build_skeleton зарегистрирован",
@@ -1098,7 +1247,7 @@ check("AddonPreferences класс есть", "NCP_AddonPrefs" in cls_names)
 ann = getattr(pkg.NCP_Props, "__annotations__", {})
 for p in ("auto_rig", "body_plan", "add_fingers", "orient_auto",
           "mesh_rot_x", "mesh_rot_z", "debug_landmarks",
-          "ctrl_ik", "ctrl_hide_deform"):
+          "ctrl_ik", "ctrl_hide_deform", "ctrl_poles", "ctrl_fingers"):
     check("prop NCP_Props.%s" % p, p in ann)
 bp = ann.get("body_plan")
 bp_ids = [it[0] for it in bp.kwargs["items"]] if isinstance(bp, _PropStub) \
@@ -1108,10 +1257,14 @@ check("Body plan enum: AUTO/HUMAN/QUADRUPED/WINGED_QUAD/BIRD/DRAGON",
                       "BIRD", "DRAGON"}, bp_ids)
 with open(os.path.join(ADDON, "blender_manifest.toml"), "rb") as f:
     man = tomllib.load(f)
-check("manifest version 2.7.0", man["version"] == "2.7.0",
+check("manifest version 2.8.0", man["version"] == "2.8.0",
       man["version"])
 with open(os.path.join(ADDON, "INSTALL_RU.txt"), encoding="utf-8") as f:
     install_txt = f.read()
+check("INSTALL_RU: секция 2.8.0 (полюсы + пальцы)",
+      "ЧТО НОВОГО В 2.8.0" in install_txt and
+      "полюс" in install_txt.lower() and
+      "CTRL_Finger" in install_txt)
 check("INSTALL_RU: секция 2.7.0 (рычаги)",
       "ЧТО НОВОГО В 2.7.0" in install_txt and
       "рычаг" in install_txt.lower())

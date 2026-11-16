@@ -9,7 +9,13 @@ neuro_character_pipeline.neuro_controls — слой рычагов (control han
   CTRL_Body  — корпус (с ним голова/хвост/крылья едут вместе);
   CTRL_Arm_L/R, CTRL_Wing_L/R — кончик руки/крыла (IK);
   CTRL_Foot_L/R (+ front/hind у четвероногих) — нога за ступню (IK);
-  CTRL_Head  — голова/шея;  CTRL_Tail — кончик хвоста.
+  CTRL_Head  — голова/шея;  CTRL_Tail — кончик хвоста;
+  CTRL_Pole_Knee_*/CTRL_Pole_Elbow_* — полюсы суставов: направление
+               сгиба колена/локтя (2-бонные IK-цепи; тянешь полюс —
+               сустав разворачивается, конечность не щёлкает: угол
+               pole_angle подбирается по факту геометрии при сборке);
+  CTRL_Finger_* — отдельный рычаг на каждый палец (IK на 2 сегмента:
+               тянешь кончик пальца — палец сгибается за мышью).
 
 Правила безопасности анимации (то, ради чего слой сделан отдельным):
   1. CTRL-кости use_deform=False — в скининг и веса не попадают,
@@ -18,12 +24,29 @@ neuro_character_pipeline.neuro_controls — слой рычагов (control han
      set_ik() — галка «IK handles» в панели. Import Neuro Motion сам
      гасит IK, чтобы нейроанимация играла как записана;
   3. остовные (deform) кости можно спрятать одной галкой — в вьюпорте
-     остаются только рычаги (кликать легко, анимировать не мешает).
+     остаются только рычаги (кликать легко, анимировать не мешает);
+  4. пальцевые рычаги попадают в отдельную коллекцию костей
+     NCP_Controls_Fine — их можно скрыть отдельно от крупных рычагов.
 
 Иерархия: CTRL_Root -> CTRL_Body -> pelvis. Root/Body/Head/Tail —
 прямое parenting (двигаются всегда, никаких констрейнтов); Arm/Wing/
-Foot — IK-цели, parent CTRL_Root (при движении тела ноги остаются
-приколотыми к ступням — можно присаживать персонажа).
+Foot/Pole — IK-цели и полюсы, parent CTRL_Root (при движении тела
+ноги остаются приколотыми к ступням — можно присаживать персонажа);
+рычаги пальцев parent к кости кисти/крыла — едут вместе с рукой.
+
+Цель IK = ХВОСТ последней кости цепи (use_tail=True, 2.8.0: в 2.7.0
+было use_tail=False — Blender исключал конечную кость из цепи и тянул
+к рычагу колено/локоть вместо ступни/кисти). Кончик рычага ставится
+ровно в сустав (голеностоп/запястье/кончик пальца).
+
+IK-хелперы NCPK_* (2.8.0): у human-контракта остовные кости ком-якорные
+(кость покрывает половину звена), 2-бонная цепь из них короче
+конечности — IK с недостижимой целью не сгибает колено. Хелперы
+натянуты сустав-в-сустав (плечо->локоть->запястье, бедро->колено->
+голеностоп), IK стоит на них, а остовные кости следуют за хелперами
+через COPY_TRANSFORMS с влиянием = галка IK. FK-анимация (Import
+Neuro Motion) пишет pb.matrix абсолютно и influence гасит — движение
+играет как записано; хелперы сбрасываются в rest при импорте.
 
 Топология рычагов строится по ФАКТУ арматуры: цепочки конечностей
 находятся обходом дерева костей (то же дерево, что построил
@@ -38,6 +61,12 @@ from mathutils import Vector
 
 PFX = "CTRL_"
 CONS_PFX = "NCP_"
+# вспомогательные IK-кости (натянуты сустав-в-сустав). У human-контракта
+# остовные кости ком-якорные (кость = половина звена), 2-бонная IK-цепь
+# из них короче конечности — IK с недостижимой целью не сгибает колено.
+# Хелперы дают солверу настоящие рычаги; остовные кости следуют за ними
+# через COPY_TRANSFORMS (влияние = галка IK, FK-анимация не затронута)
+HLP_PFX = "NCPK_"
 
 # кости-коннекторы (короткие перемычки у груди/таза) в IK-цепи не берём
 _CONNECTORS = ("shoulderP_", "hipR_")
@@ -58,7 +87,12 @@ _KIND_COLOR = {
     "leg": (0.90, 0.20, 0.20, 0.9),
     "wing": (0.65, 0.35, 0.90, 0.9),
     "tail": (0.40, 0.80, 0.90, 0.9),
+    "pole": (0.90, 0.25, 0.55, 0.9),
+    "finger": (0.95, 0.60, 0.15, 0.9),
 }
+
+# имена человеческих пальцев (add_finger_chains: fng_thumb_1_L ...)
+_FINGER_NAMES = ("thumb", "index", "middle", "ring", "pinky")
 
 
 class ControlsError(RuntimeError):
@@ -106,6 +140,8 @@ def _object_mode():
 def _children_map(ebs):
     out = {}
     for eb in ebs:
+        if eb.name.startswith(HLP_PFX):
+            continue                     # хелперы прозрачны для топологии
         p = eb.parent
         if p is not None:
             out.setdefault(p.name, []).append(eb.name)
@@ -126,6 +162,18 @@ def _classify(first_name):
     return None
 
 
+def _dot(a, b):
+    """Скалярное произведение по компонентам (работает и со стабом)."""
+    return a.x * b.x + a.y * b.y + a.z * b.z
+
+
+def _cross(a, b):
+    """Векторное произведение по компонентам (работает и со стабом)."""
+    return Vector(a.y * b.z - a.z * b.y,
+                  a.z * b.x - a.x * b.z,
+                  a.x * b.y - a.y * b.x)
+
+
 def _side_of(chain_names):
     for n in chain_names:
         if n.endswith("_L") or "_L_" in n:
@@ -143,6 +191,71 @@ def _qual_of(first_name):
     if m:
         return "_" + m.group(1)
     return ""
+
+
+def find_finger_chains(arm_obj):
+    """Пальцевые цепочки (fng_*) по факту дерева костей.
+
+    Возвращает список dict(parent, side, bones): parent — кость кисти/
+    крыла (родитель первого сегмента), bones — сегменты пальца от
+    основания к кончику (обычно 2). Человек: 10 пальцев по 2 сегмента
+    (fng_thumb_1_L...), creature — 1-5 пальцев с геометрии или std."""
+    _edit_mode(arm_obj)
+    try:
+        ebs = arm_obj.data.edit_bones
+        children = _children_map(ebs)
+        out = []
+        for eb in ebs:
+            nm = eb.name
+            if not nm.startswith("fng_"):
+                continue
+            par = eb.parent
+            if par is not None and par.name.startswith("fng_"):
+                continue                   # не основание пальца
+            chain = [nm]
+            while True:
+                kids = [k for k in children.get(chain[-1], [])
+                        if k.startswith("fng_")]
+                if len(kids) != 1:
+                    break
+                chain.append(kids[0])
+            out.append({
+                "parent": par.name if par is not None else "",
+                "side": _side_of(chain),
+                "bones": chain,
+            })
+        return out
+    finally:
+        _object_mode()
+
+
+def _finger_handle_name(first_bone, used):
+    """CTRL_Finger_* — короткое имя рычага пальца.
+
+    Человек: fng_thumb_1_L -> CTRL_Finger_thumb_L; creature:
+    fng_arm_L_1_1 -> CTRL_Finger_arm_L_1, fng_arm_L_std_1_1 ->
+    CTRL_Finger_arm_L_std_1. Коллизии гасятся суффиксом _2/_3..."""
+    m = re.match(r"fng_(%s)_(\d+)_(L|R)$" % "|".join(_FINGER_NAMES),
+                 first_bone)
+    if m:
+        base = "CTRL_Finger_%s_%s" % (m.group(1), m.group(3))
+    else:
+        m = re.match(r"fng_(.+)_std_(\d+)_(\d+)$", first_bone)
+        if m:
+            base = "CTRL_Finger_%s_std_%s" % (m.group(1), m.group(2))
+        else:
+            m = re.match(r"fng_(.+?)_(\d+)_(\d+)$", first_bone)
+            if m:
+                base = "CTRL_Finger_%s_%s" % (m.group(1), m.group(2))
+            else:
+                base = "CTRL_Finger_" + first_bone[4:]
+    name = base
+    i = 2
+    while name in used:
+        name = "%s_%d" % (base, i)
+        i += 1
+    used.add(name)
+    return name
 
 
 def find_chains(arm_obj):
@@ -310,25 +423,122 @@ def _dir_of(eb):
 
 
 def _bone_kind(handle_name):
-    return "leg" if handle_name.startswith("CTRL_Foot") else \
+    return "pole" if handle_name.startswith("CTRL_Pole") else \
+        "finger" if handle_name.startswith("CTRL_Finger") else \
+        "leg" if handle_name.startswith("CTRL_Foot") else \
         "head" if handle_name.startswith("CTRL_Head") else \
         "wing" if handle_name.startswith("CTRL_Wing") else \
         "tail" if handle_name.startswith("CTRL_Tail") else "arm"
 
 
-def build_controls(arm_obj, ik_on=True, hide_deform=False):
+def _perp_to(v, axis):
+    """Компонента v, перпендикулярная axis (или None для вырожденной)."""
+    o = v - axis * _dot(v, axis)
+    return o if o.length > 1e-9 else None
+
+
+def _bone_axes(eb):
+    """(X, Z) оси кости в пространстве арматуры (из матрицы кости).
+
+    Нужны для pole_angle: Blender сгибает 2-бонную IK-цепь в
+    направлении up(theta) = X*cos(theta) + Z*sin(theta)."""
+    try:
+        m = eb.matrix
+        return m.col[0], m.col[2]
+    except Exception:
+        return None, None
+
+
+def _horiz_dir(v):
+    """Горизонтальная проекция направления (носок вперёд)."""
+    h = Vector((v.x, v.y, 0.0))
+    if h.length < 1e-9:
+        return None
+    return h.normalized()
+
+
+def _avg_dir(dirs, fallback):
+    """Среднее направление (носок вперёд) или fallback (+X = лицо)."""
+    acc = Vector((0.0, 0.0, 0.0))
+    for d in dirs:
+        acc = acc + d
+    if acc.length < 1e-9:
+        return fallback
+    return acc.normalized()
+
+
+def _pole_bend_dir(eb1, anchor, face, kind, qual):
+    """Куда должен смотреть сустав (колено/локоть) — направление сгиба.
+
+    Основной вариант — по факту геометрии: проекция первой кости цепи
+    на плоскость, перпендикулярную оси цепи (сустав и так согнут,
+    сохраняем его направление). Для прямой цепи — анатомический
+    запасной вариант: колено вперёд (к носку; у передних лап
+    четвероногих — назад, как локоть), локоть назад."""
+    axis = anchor - eb1.head
+    if axis.length < 1e-9:
+        return None
+    axis = axis * (1.0 / axis.length)
+    k = _perp_to(eb1.tail - eb1.head, axis)
+    if k is not None:
+        return k.normalized()
+    back = Vector((-face.x, -face.y, -face.z))   # назад = против носка
+    if kind == "leg":
+        return back if qual == "_front" else face
+    return back
+
+
+def _pole_angle_for(eb1, rootpos, target, bend_dir):
+    """pole_angle (радианы) для 2-бонной IK-цепи с полюсом.
+
+    Солвер Blender (intern/iksolver, ConstrainPoleVector): при
+    pole_angle=theta суставная ось up(theta) = X_кости*cos(theta) +
+    Z_кости*sin(theta) разворачивается на полюс — и цепь сгибается
+    в этом направлении. Подбираем theta так, чтобы при включении IK
+    сустав остался в текущем положении (bend_dir) — без прыжка позы;
+    дальше пользователь тянет полюс — сустав следует за ним."""
+    axis = target - rootpos
+    if axis.length < 1e-9:
+        return 0.0
+    axis = axis * (1.0 / axis.length)
+    ax, az = _bone_axes(eb1)
+    if ax is None or az is None:
+        return 0.0
+    a = _perp_to(ax, axis)
+    b = _perp_to(az, axis)
+    k = _perp_to(bend_dir, axis)
+    if a is None or b is None or k is None:
+        return 0.0
+    aa = _dot(_cross(a, k), axis)
+    bb = _dot(_cross(b, k), axis)
+    if abs(aa) + abs(bb) < 1e-12:
+        return 0.0
+    theta = math.atan2(-aa, bb)
+    up = a * math.cos(theta) + b * math.sin(theta)
+    if _dot(up, k) < 0.0:
+        theta += math.pi
+    return theta
+
+
+def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
+                   poles=True):
     """Собрать слой рычагов. Возвращает короткий отчёт (строка).
 
-    Ломать риг не может: каждая косметическая вещь (формы, цвета,
+    fingers — отдельные рычаги пальцев (CTRL_Finger_*, IK на 2
+    сегмента); poles — полюсы коленей/локтей (CTRL_Pole_*). Ломать
+    риг не может: каждая косметическая вещь (формы, цвета,
     коллекции) обёрнута в try/except."""
     if arm_obj is None or getattr(arm_obj, "type", "") != "ARMATURE":
         raise ControlsError("нет арматуры")
     remove_controls(arm_obj)                 # пересборка на чистую
 
     chains = find_chains(arm_obj)
+    fchains = find_finger_chains(arm_obj) if fingers else []
 
     # -- сессия редактирования: CTRL-кости + пере-parenting корня
     made = []
+    poles_made = []
+    fingers_made = []
     lens = {}
     kind_sizes = {}
     h = 0.05
@@ -362,6 +572,10 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False):
                 pass
             if parent is not None:
                 eb.parent = ebs.get(parent)
+                try:
+                    eb.use_connect = False
+                except Exception:
+                    pass
             made.append(name)
             return eb
 
@@ -381,21 +595,150 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False):
                 pass
 
         used = {"CTRL_Root", "CTRL_Body"}
+        toe_dirs = []
         for ch in chains:
             ebs_c = [ebs.get(n) for n in ch["bones"]]
             if any(e is None for e in ebs_c):
                 continue
             tip = ebs_c[-1]
             d = _dir_of(tip)
+            # кости IK-цепи: без коннекторов; у ног ступня — вне цепи
+            # (она получает COPY_ROTATION от рычага)
+            ikn = [n for n in (ch["bones"][:-1]
+                               if ch["kind"] == "leg" else ch["bones"])
+                   if not n.startswith(_CONNECTORS)]
+            if ch["kind"] == "leg":
+                ikn = [n for n in ikn
+                       if lens.get(n, 0.0) >= 0.07 * h]
+            if not ikn:
+                continue
+            last_ik = ebs.get(ikn[-1])
+            if last_ik is None:
+                continue
+            # якорь рычага: сустав, за который берутся рукой —
+            # голеностоп (голова ступни) у ног, кончик у остальных
             anchor = tip.head if ch["kind"] == "leg" else tip.tail
+            anchor = Vector((anchor.x, anchor.y, anchor.z))
+            ch["ik_names"] = ikn
+            ch["anchor"] = anchor
             name = _handle_name(ch["kind"], ch["side"], ch["qual"], used)
             par = "CTRL_Body" if ch["kind"] in ("head", "tail", "wing") \
                 else "CTRL_Root"
-            new_ctrl(name, (anchor.x, anchor.y, anchor.z),
-                     anchor + d * max(0.10 * h, tip.length * 0.6),
-                     parent=par)
+            # цель IK = хвост рычага (use_tail=True) — кончик рычага
+            # ровно в суставе, кость рычага уходит назад за сустав
+            hl = max(0.06 * h, min(tip.length * 0.5, 0.12 * h))
+            new_ctrl(name, anchor - d * hl, anchor, parent=par)
             ch["handle"] = name
             kind_sizes[name] = max(0.09 * h, min(tip.length, 0.25 * h))
+            if ch["kind"] == "leg":
+                hd = _horiz_dir(d)
+                if hd is not None:
+                    toe_dirs.append(hd)
+
+        # -- IK-хелперы сустав-в-сустав: у human-контракта остовные
+        # кости ком-якорные (кость = половина звена: бедро — от сустава
+        # до середины бедра), 2-бонная цепь из них КОРОЧЕ конечности,
+        # IK с недостижимой целью не сгибает колено. Хелперы натянуты
+        # по настоящим суставам; остовные кости следуют за ними через
+        # COPY_TRANSFORMS (влияние = галка IK; FK-анимация пишет
+        # pb.matrix абсолютно и не затронута). У creature-планов кости
+        # уже сустав-в-сустав — хелперы не нужны
+        helpers_made = 0
+        for ch in chains:
+            ikn = ch.get("ik_names") or []
+            if ch["kind"] not in ("leg", "arm") or len(ikn) != 2:
+                ch["ik_host"] = ikn
+                continue
+            b1, b2 = ebs.get(ikn[0]), ebs.get(ikn[1])
+            if b1 is None or b2 is None:
+                ch["ik_host"] = ikn
+                continue
+            gap = float((b2.head - b1.tail).length)
+            if gap <= 0.02 * h:
+                ch["ik_host"] = ikn        # кости уже сустав-в-сустав
+                continue
+            hname = ch["handle"] or "CTRL_Limb"
+            n1 = HLP_PFX + hname[len(PFX):] + "_1"
+            n2 = HLP_PFX + hname[len(PFX):] + "_2"
+            if n1 in used or n2 in used:
+                ch["ik_host"] = ikn
+                continue
+            used.add(n1)
+            used.add(n2)
+            try:
+                h1 = ebs.new(n1)
+                h1.head = Vector((b1.head.x, b1.head.y, b1.head.z))
+                h1.tail = Vector((b2.head.x, b2.head.y, b2.head.z))
+                h1.roll = 0.0
+                h1.use_deform = False
+                h1.parent = b1.parent
+                h2 = ebs.new(n2)
+                h2.head = Vector((b2.head.x, b2.head.y, b2.head.z))
+                h2.tail = Vector((ch["anchor"].x, ch["anchor"].y,
+                                  ch["anchor"].z))
+                h2.roll = 0.0
+                h2.use_deform = False
+                h2.parent = h1
+                ch["ik_host"] = [n1, n2]
+                ch["hlp_map"] = ((ikn[0], n1), (ikn[1], n2))
+                helpers_made += 2
+            except Exception:
+                ch["ik_host"] = ikn
+
+        # -- полюсы коленей/локтей: только 2-бонные leg/arm цепи
+        if poles:
+            face = _avg_dir(toe_dirs, Vector((1.0, 0.0, 0.0)))
+            for ch in chains:
+                host = ch.get("ik_host") or []
+                if ch["kind"] not in ("leg", "arm") or len(host) != 2:
+                    continue          # полюс — только для 2-бонных цепей
+                eb1, eb2 = ebs.get(host[0]), ebs.get(host[1])
+                if eb1 is None or eb2 is None:
+                    continue
+                kdir = _pole_bend_dir(eb1, ch["anchor"], face,
+                                      ch["kind"], ch["qual"])
+                if kdir is None:
+                    continue
+                joint = "Knee" if ch["kind"] == "leg" else "Elbow"
+                base = "CTRL_Pole_%s%s%s" % (joint, ch["qual"] or "",
+                                             ch["side"] or "")
+                pname = base
+                i = 2
+                while pname in used:
+                    pname = "%s_%d" % (base, i)
+                    i += 1
+                used.add(pname)
+                rootpos = Vector((eb1.head.x, eb1.head.y, eb1.head.z))
+                kneepos = Vector((eb2.head.x, eb2.head.y, eb2.head.z))
+                chain_len = float((ch["anchor"] - rootpos).length)
+                pl = max(0.10 * h, min(0.35 * chain_len, 0.30 * h))
+                new_ctrl(pname, kneepos, kneepos + kdir * pl,
+                         parent="CTRL_Root")
+                ch["pole"] = pname
+                ch["pole_angle"] = _pole_angle_for(eb1, rootpos,
+                                                   ch["anchor"], kdir)
+                poles_made.append(pname)
+                kind_sizes[pname] = max(0.045 * h,
+                                        min(0.10 * h, 0.35 * pl))
+
+        # -- рычаги пальцев: по одному на каждый пальцевую цепочку
+        for fc in fchains:
+            segs = [ebs.get(n) for n in fc["bones"]]
+            if any(e is None for e in segs):
+                continue
+            if not fc["parent"] or ebs.get(fc["parent"]) is None:
+                continue
+            tipf = segs[-1]
+            d = _dir_of(tipf)
+            fname = _finger_handle_name(fc["bones"][0], used)
+            hl = max(0.015 * h, min(tipf.length * 0.6, 0.04 * h))
+            # рычаг пальца parent к кисти/крылу: едет вместе с рукой
+            new_ctrl(fname, tipf.tail - d * hl, tipf.tail,
+                     parent=fc["parent"])
+            fc["handle"] = fname
+            fingers_made.append(fname)
+            kind_sizes[fname] = max(0.025 * h,
+                                    min(tipf.length * 0.8, 0.06 * h))
     finally:
         _object_mode()
 
@@ -404,47 +747,86 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False):
         handle = ch.get("handle")
         if not handle:
             continue
-        pbs = [arm_obj.pose.bones.get(n) for n in ch["bones"]]
-        if any(pb is None for pb in pbs):
+        host = ch.get("ik_host") or ch.get("ik_names") or []
+        if not host or any(arm_obj.pose.bones.get(n) is None
+                           for n in host):
             continue
-        if ch["kind"] == "leg":
-            ik_names = [n for n in ch["bones"][:-1]
-                        if not n.startswith(_CONNECTORS)]
-            ik_names = [n for n in ik_names
-                        if lens.get(n, 0.0) >= 0.07 * h]
-        else:
-            ik_names = [n for n in ch["bones"]
-                        if not n.startswith(_CONNECTORS)]
-        if not ik_names:
-            continue
-        last = arm_obj.pose.bones.get(ik_names[-1])
+        last = arm_obj.pose.bones.get(host[-1])
         if last is not None:
             try:
                 c = last.constraints.new("IK")
                 c.name = CONS_PFX + "IK_" + handle
                 c.target = arm_obj
                 c.subtarget = handle
-                c.chain_count = min(3, len(ik_names))
+                c.chain_count = min(3, len(host))
+                # 2.8.0: use_tail=True — конечная кость В цепи, конец
+                # цепи (ступня/кисть/кончик) тянется к хвосту рычага.
+                # В 2.7.0 стояло False: Blender исключал конечную кость
+                # и тянул к рычагу колено/локоть вместо ступни/кисти
+                c.use_tail = True
                 try:
                     c.use_stretch = False
                 except Exception:
                     pass
+            except Exception:
+                pass
+            # полюс сустава: направление сгиба колена/локтя
+            pname = ch.get("pole")
+            if pname:
                 try:
-                    c.use_tail = False
+                    c.pole_target = arm_obj
+                    c.pole_subtarget = pname
+                    c.pole_angle = float(ch.get("pole_angle", 0.0))
                 except Exception:
                     pass
-            except Exception:
-                pass
         # ступня смотрит туда же, куда повернули рычаг
         if ch["kind"] == "leg":
-            foot_pb = pbs[-1]
+            foot_pb = arm_obj.pose.bones.get(ch["bones"][-1])
+            if foot_pb is not None:
+                try:
+                    c = foot_pb.constraints.new("COPY_ROTATION")
+                    c.name = CONS_PFX + "ROT_" + handle
+                    c.target = arm_obj
+                    c.subtarget = handle
+                except Exception:
+                    pass
+
+    # -- остовные кости следуют за IK-хелперами (влияние = галка IK;
+    # при выключенном IK кости свободны — FK-анимация играет как записана)
+    for ch in chains:
+        for bone_name, hlp_name in ch.get("hlp_map") or ():
+            pb = arm_obj.pose.bones.get(bone_name)
+            if pb is None or arm_obj.pose.bones.get(hlp_name) is None:
+                continue
             try:
-                c = foot_pb.constraints.new("COPY_ROTATION")
-                c.name = CONS_PFX + "ROT_" + handle
+                c = pb.constraints.new("COPY_TRANSFORMS")
+                c.name = CONS_PFX + "CT_" + bone_name
                 c.target = arm_obj
-                c.subtarget = handle
+                c.subtarget = hlp_name
             except Exception:
                 pass
+
+    # -- констрейнты пальцев: IK кончика пальца на рычаг
+    for fc in fchains:
+        handle = fc.get("handle")
+        if not handle:
+            continue
+        tip_pb = arm_obj.pose.bones.get(fc["bones"][-1])
+        if tip_pb is None:
+            continue
+        try:
+            c = tip_pb.constraints.new("IK")
+            c.name = CONS_PFX + "IK_" + handle
+            c.target = arm_obj
+            c.subtarget = handle
+            c.chain_count = min(2, len(fc["bones"]))
+            c.use_tail = True
+            try:
+                c.use_stretch = False
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     # -- косметика: формы, цвета, коллекции, видимость
     pose = arm_obj.pose.bones
@@ -466,7 +848,9 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False):
             _set_color(pb, _KIND_COLOR[_bone_kind(name)])
         except Exception:
             pass
-        _assign_coll(arm_obj.data, name, "NCP_Controls")
+        coll = "NCP_Controls_Fine" if name.startswith("CTRL_Finger_") \
+            else "NCP_Controls"
+        _assign_coll(arm_obj.data, name, coll)
     for pb in pose:
         if not pb.name.startswith(PFX):
             _assign_coll(arm_obj.data, pb.name, "NCP_Deform")
@@ -483,10 +867,20 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False):
     set_deform_hidden(arm_obj, bool(hide_deform))
     if not made:
         return ""
-    handles = ", ".join(made[2:])
-    return "рычаги: %d (Root, Body%s%s)" % (
-        len(made), ", " + handles if handles else "",
-        "; IK выкл" if not ik_on else "")
+    main_handles = [ch.get("handle") for ch in chains
+                    if ch.get("handle")]
+    rep = "рычаги: %d (Root, Body%s)" % (
+        2 + len(main_handles),
+        ", " + ", ".join(main_handles) if main_handles else "")
+    if poles_made:
+        rep += "; полюсов: %d (колени/локти)" % len(poles_made)
+    if fingers_made:
+        rep += "; пальцев: %d" % len(fingers_made)
+    if helpers_made:
+        rep += "; IK-хелперов: %d" % helpers_made
+    if not ik_on:
+        rep += "; IK выкл"
+    return rep
 
 
 def remove_constraints(arm_obj):
@@ -504,15 +898,18 @@ def remove_constraints(arm_obj):
 
 
 def remove_controls(arm_obj):
-    """Удалить слой рычагов (кости CTRL_* и констрейнты NCP_*)."""
+    """Удалить слой рычагов (кости CTRL_*/NCPK_* и констрейнты NCP_*)."""
     n = remove_constraints(arm_obj)
     _edit_mode(arm_obj)
     try:
         ebs = arm_obj.data.edit_bones
         orphan_fix = [eb for eb in ebs
                       if eb.parent is not None and
-                      eb.parent.name.startswith(PFX)]
-        for eb in [eb for eb in ebs if eb.name.startswith(PFX)]:
+                      (eb.parent.name.startswith(PFX) or
+                       eb.parent.name.startswith(HLP_PFX))]
+        for eb in [eb for eb in ebs
+                   if eb.name.startswith(PFX)
+                   or eb.name.startswith(HLP_PFX)]:
             ebs.remove(eb)
         for eb in orphan_fix:
             try:
@@ -590,6 +987,29 @@ def set_deform_hidden(arm_obj, on):
         arm_obj["ncp_deform_hidden"] = bool(on)
     except Exception:
         pass
+
+
+def reset_helpers(arm_obj):
+    """Сбросить позу IK-хелперов в rest (влияние COPY_TRANSFORMS
+    при выключенном IK = 0, но хелперы могли остаться в позированной
+    позиции после ручной анимации — сброс перед нейроанимацией)."""
+    n = 0
+    try:
+        for pb in arm_obj.pose.bones:
+            if not pb.name.startswith(HLP_PFX):
+                continue
+            for attr, val in (("location", (0.0, 0.0, 0.0)),
+                              ("rotation_quaternion", (1.0, 0.0, 0.0,
+                                                       0.0)),
+                              ("scale", (1.0, 1.0, 1.0))):
+                try:
+                    setattr(pb, attr, val)
+                except Exception:
+                    pass
+            n += 1
+    except Exception:
+        pass
+    return n
 
 
 def select_handles(context, arm_obj):

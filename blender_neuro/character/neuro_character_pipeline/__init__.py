@@ -11,7 +11,7 @@ URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слета
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 7, 0),
+    "version": (2, 8, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP | Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
@@ -280,7 +280,8 @@ def _add_controls(context, arm):
     try:
         return neuro_controls.build_controls(
             arm, ik_on=bool(st.ctrl_ik),
-            hide_deform=bool(st.ctrl_hide_deform))
+            hide_deform=bool(st.ctrl_hide_deform),
+            fingers=bool(st.ctrl_fingers), poles=bool(st.ctrl_poles))
     except Exception as e:
         try:
             st.status += " | рычаги не построились (%s: %s)" \
@@ -555,6 +556,24 @@ def _ctrl_hide_update(self, context):
         pass
 
 
+def _ctrl_rebuild_update(self, context):
+    """Галки полюсов/пальцев: пересборка слоя рычагов на лету."""
+    arm = bpy.data.objects.get("NeuroCharacter")
+    if arm is None or arm.type != "ARMATURE" or \
+            not neuro_controls.has_handles(arm):
+        return
+    st = context.scene.ncp
+    try:
+        note = neuro_controls.build_controls(
+            arm, ik_on=bool(st.ctrl_ik),
+            hide_deform=bool(st.ctrl_hide_deform),
+            fingers=bool(st.ctrl_fingers), poles=bool(st.ctrl_poles))
+        if note:
+            st.status = (st.status or "").split("; рычаги")[0] + "; " + note
+    except Exception:
+        pass
+
+
 class NCP_Props(bpy.types.PropertyGroup):
     # --- шаг 1: эскиз
     sketch_path: StringProperty(
@@ -697,6 +716,19 @@ class NCP_Props(bpy.types.PropertyGroup):
                     "IK. Выключите, чтобы нейроанимация играла как "
                     "записана (Import Neuro Motion выключает сам); Root "
                     "и Body двигают персонажа и без IK")
+    ctrl_poles: BoolProperty(
+        name="Knee/elbow poles", default=True,
+        update=_ctrl_rebuild_update,
+        description="Полюсы суставов (CTRL_Pole_Knee/Elbow): "
+                    "направление сгиба колена и локтя. Тяните полюс — "
+                    "сустав разворачивается; конечность не щёлкает при "
+                    "включении IK (pole_angle подбирается по геометрии)")
+    ctrl_fingers: BoolProperty(
+        name="Finger handles", default=True,
+        update=_ctrl_rebuild_update,
+        description="Отдельный рычаг на каждый палец (CTRL_Finger_*): "
+                    "тяните кончик пальца — палец сгибается за мышью. "
+                    "Рычаги едут вместе с кистью и не деформируют меш")
     ctrl_hide_deform: BoolProperty(
         name="Hide skeleton bones", default=False,
         update=_ctrl_hide_update,
@@ -1055,7 +1087,8 @@ class NCP_OT_rebuild_handles(bpy.types.Operator):
         try:
             note = neuro_controls.build_controls(
                 arm, ik_on=bool(st.ctrl_ik),
-                hide_deform=bool(st.ctrl_hide_deform))
+                hide_deform=bool(st.ctrl_hide_deform),
+                fingers=bool(st.ctrl_fingers), poles=bool(st.ctrl_poles))
         except Exception as e:
             _fail(context, "Рычаги: %s: %s" % (type(e).__name__, e))
             self.report({"ERROR"}, "%s: %s" % (type(e).__name__, e))
@@ -1207,16 +1240,24 @@ class NCP_OT_import_motion(bpy.types.Operator, ImportHelper):
             n, fps = neuro_rig.apply_motion_to_armature(
                 arm, payload, frame_step=st.frame_step)
             # рычаги: построить, если их нет; IK гасим — записанное
-            # движение важнее (рычаги не должны мешать анимации)
+            # движение важнее (рычаги не должны мешать анимации);
+            # IK-хелперы сбрасываем в rest, чтобы остовные кости
+            # (COPY_TRANSFORMS с нулевым влиянием) играли FK как записано
             if not neuro_controls.has_handles(arm):
                 try:
                     neuro_controls.build_controls(
                         arm, ik_on=False,
-                        hide_deform=bool(st.ctrl_hide_deform))
+                        hide_deform=bool(st.ctrl_hide_deform),
+                        fingers=bool(st.ctrl_fingers),
+                        poles=bool(st.ctrl_poles))
                 except Exception:
                     pass
             else:
                 neuro_controls.set_ik(arm, False)
+            try:
+                neuro_controls.reset_helpers(arm)
+            except Exception:
+                pass
             st.ctrl_ik = False
             if st.build_world and payload.get("world"):
                 neuro_rig.add_ground()
@@ -1818,6 +1859,9 @@ class NCP_PT_handles(_NCPSubPanel):
         st = context.scene.ncp
         lay = self.layout
         lay.prop(st, "ctrl_ik")
+        row = lay.row(align=True)
+        row.prop(st, "ctrl_poles")
+        row.prop(st, "ctrl_fingers")
         lay.prop(st, "ctrl_hide_deform")
         row = lay.row(align=True)
         row.operator("ncp.select_handles", text="Select Handles",
@@ -1826,7 +1870,8 @@ class NCP_PT_handles(_NCPSubPanel):
                      icon="FILE_REFRESH")
         _hint(lay, "Тяните рычаг мышью: Root — весь персонаж, Body — "
                    "корпус (голова/хвост/крылья вместе), Foot/Arm — "
-                   "конечности через IK")
+                   "конечности через IK. Полюс — направление сгиба "
+                   "колена/локтя, рычаг пальца — сгибает палец")
         _hint(lay, "Рычаги не деформируют меш и в костях не анимируются. "
                    "Для нейроанимации выключите IK — или импортируйте "
                    "движение: он выключит IK сам")
