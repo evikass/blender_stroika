@@ -14,7 +14,7 @@ Neuro Character Pipeline — мастер-аддон, связывающий:
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 10, 0),
+    "version": (2, 10, 1),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP (GPU-карточка) | "
                 "Properties > Scene",
@@ -292,7 +292,12 @@ def _clear_old_rig():
 
 def _add_controls(context, arm):
     """Слой рычагов поверх готового рига. Неудача не роняет скелет.
-    Возвращает короткую заметку для статус-карточки (или "")."""
+    Возвращает короткую заметку для статус-карточки (или "").
+
+    v2.10.1: заметка об ошибке больше не теряется — раньше
+    «рычаги не построились (…)» писались в st.status ДО того, как
+    вызывающий код перезаписывал статус отчётом сборки, и
+    пользователь видел скелет без рычагов и без объяснений."""
     st = _st(context)
     try:
         note = neuro_controls.build_controls(
@@ -311,12 +316,9 @@ def _add_controls(context, arm):
             pass
         return note
     except Exception as e:
-        try:
-            st.status += " | рычаги не построились (%s: %s)" \
-                % (type(e).__name__, e)
-        except Exception:
-            pass
-        return ""
+        return ("; РЫЧАГИ НЕ ПОСТРОИЛИСЬ (%s: %s) — переключатели "
+                "рычагов можно выключить и нажать Пересобрать"
+                % (type(e).__name__, e))
 
 
 def _build_rig(context, mesh):
@@ -356,11 +358,14 @@ def _build_rig(context, mesh):
         mesh, spec, rot_x_deg=rot_x, rot_z_deg=rot_z,
         do_apply=st.apply_transforms)
     neuro_rig.skin_mesh_to_armature(mesh, arm)
-    _add_controls(context, arm)
+    ctrl_note = _add_controls(context, arm)
     if st.orient_auto and (abs(rot_x) > 1e-6 or abs(rot_z) > 1e-6):
         _st(context).status = ("Меш повёрнут (авто): X%+g°, Z%+g° — "
                                "если смотрит назад, поставьте rot Z = -90"
                                % (rot_x, rot_z))
+    if ctrl_note:
+        st_cur = _st(context)
+        st_cur.status = (st_cur.status + "; " + ctrl_note).strip("; ")
     return arm
 
 
@@ -397,9 +402,17 @@ def _build_rig_auto(context, mesh, spec, rot_x, rot_z):
                                  add_fingers=st.add_fingers)
     arm = neuro_rig.build_armature(res["spec"], name="NeuroCharacter")
     arm["ncp_height"] = float(res["h"])
+    fingers_geo_note = ""
     if res["plan"] == "human":
         if st.add_fingers:
-            neuro_rig.add_finger_chains(arm, scale=res["h"] / 1.70)
+            fpaths = res.get("fingers") or {}
+            n_geo = sum(len(v) for v in fpaths.values()
+                        if isinstance(v, (list, tuple)))
+            n_f = neuro_rig.add_finger_chains(
+                arm, scale=res["h"] / 1.70, finger_paths=fpaths)
+            if n_geo >= 6:
+                fingers_geo_note = ("; пальцы по геометрии кисти: %d "
+                                    "(веер не понадобился)" % n_f)
     else:
         arm["ncp_plan"] = res["plan"]
         if res["notes"]:
@@ -408,7 +421,7 @@ def _build_rig_auto(context, mesh, spec, rot_x, rot_z):
     ctrl_note = _add_controls(context, arm)
     if st.debug_landmarks:
         neuro_creature.make_landmarks(res["joints"], res["h"])
-    note = ""
+    note = fingers_geo_note
     if st.orient_auto:
         if abs(rot_x) > 1e-6:
             note += "; меш поднят из лежачего положения (rot X %+g)" % rot_x

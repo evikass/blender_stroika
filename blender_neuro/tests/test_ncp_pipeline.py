@@ -72,6 +72,10 @@ class FakeVector:
 
     __rmul__ = __mul__
 
+    def __getitem__(self, i):
+        # настоящий mathutils.Vector поддерживает индексацию v[0]/v[1]/v[2]
+        return (self.x, self.y, self.z)[i]
+
     def dot(self, o):
         return self.x * o.x + self.y * o.y + self.z * o.z
 
@@ -128,10 +132,23 @@ class FakeQuaternion:
 
 
 class FakeMatrix3:
-    """3x3-рамка кости: .col — оси X/Y/Z (Y вдоль кости)."""
+    """3x3-рамка кости: .col — оси X/Y/Z (Y вдоль кости).
+
+    v2.10.1: добавлена индексация m[r][c] (строки) — как у настоящей
+    матрицы Blender (там 4x4, EditBone.matrix). neuro_controls.
+    _bone_axes читает оси именно так (m[0][0], m[1][0]...): колонки
+    m.col[i] на Blender 4+ 4-компонентные и роняли слой рычагов."""
 
     def __init__(self, x, y, z):
         self.col = (x, y, z)
+
+    def __getitem__(self, i):
+        x, y, z = self.col
+        if i == 0:
+            return (x.x, y.x, z.x)
+        if i == 1:
+            return (x.y, y.y, z.y)
+        return (x.z, y.z, z.z)
 
 
 def _stub_cross(a, b):
@@ -1596,7 +1613,7 @@ pkg = importlib.util.module_from_spec(spec_imp)
 sys.modules["neuro_character_pipeline"] = pkg
 spec_imp.loader.exec_module(pkg)
 
-check("bl_info version 2.10.0", pkg.bl_info["version"] == (2, 10, 0),
+check("bl_info version 2.10.1", pkg.bl_info["version"] == (2, 10, 1),
       pkg.bl_info["version"])
 cls_names = [c.__name__ for c in pkg.classes]
 check("NCP_OT_build_skeleton зарегистрирован",
@@ -1642,12 +1659,13 @@ check("Body plan enum: AUTO/HUMAN/QUADRUPED/WINGED_QUAD/BIRD/DRAGON",
                       "BIRD", "DRAGON"}, bp_ids)
 with open(os.path.join(ADDON, "blender_manifest.toml"), "rb") as f:
     man = tomllib.load(f)
-check("manifest version 2.10.0", man["version"] == "2.10.0",
+check("manifest version 2.10.1", man["version"] == "2.10.1",
       man["version"])
 with open(os.path.join(ADDON, "INSTALL_RU.txt"), encoding="utf-8") as f:
     install_txt = f.read()
 check("INSTALL_RU: секция 2.10.0 (GPU-карточка)",
-      "ЧТО НОВОГО В 2.10.0" in install_txt and
+      "ЧТО НОВОГО В 2.10.0" in install_txt and  # секция остаётся в истории
+      "ЧТО НОВОГО В 2.10.1" in install_txt and
       "GPU-карточка" in install_txt and
       "панель" in install_txt and
       "T-ПОЗА" in install_txt.upper())
@@ -1736,6 +1754,119 @@ finally:
     ov._pkg = _saved_pkgfn
     ov._state["tab"] = "gen"
     ov._state["note"] = None
+
+# ======================= F2. v2.10.1: рычаги на Blender 4+/5.x, пальцы
+# по геометрии, x рук при рыскании (жалобы: «нет колец и рычагов»,
+# «кости у пальцев не совпадают с пальцами»)
+
+# ---- AST: Vector(x, y, z) с несколькими позиционными аргументами
+# запрещён (Blender 4+ требует Vector((x, y, z)) — TypeError на 5.x
+# ронял весь слой рычагов через _cross)
+def _bad_vector_calls(path):
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        nm = fn.id if isinstance(fn, ast.Name) else \
+            getattr(fn, "attr", None)
+        if nm == "Vector" and len(node.args) >= 2:
+            bad.append(node.lineno)
+    return bad
+
+_vec_total = {}
+for mod in ("neuro_controls.py", "neuro_rig.py", "neuro_creature.py",
+            "neuro_autorig.py", "__init__.py", "ncp_overlay.py"):
+    bad = _bad_vector_calls(os.path.join(ADDON, mod))
+    _vec_total[mod] = bad
+    check("AST: Vector только с одним аргументом-последовательностью "
+          "— %s" % mod, not bad, bad)
+
+# ---- _bone_axes читает оси из m[r][c] (Blender 4+: EditBone.matrix
+# 4x4, m.col[i] — 4-компонентные; на стабе FakeMatrix3 теперь тоже
+# даёт m[r][c])
+nctl._edit_mode(arm)
+try:
+    eb_u = arm.data.edit_bones.get("uarm_L")
+    ax, az = nctl._bone_axes(eb_u)
+    y_ax = eb_u.vector.normalized()
+    _d_ax = ax.x * y_ax.x + ax.y * y_ax.y + ax.z * y_ax.z \
+        if ax is not None else 1.0
+    _d_az = az.x * y_ax.x + az.y * y_ax.y + az.z * y_ax.z \
+        if az is not None else 1.0
+    check("v2.10.1: _bone_axes — оси единичные и поперёк кости",
+          ax is not None and az is not None and
+          abs(ax.length - 1.0) < 1e-5 and abs(az.length - 1.0) < 1e-5 and
+          abs(_d_ax) < 1e-5 and abs(_d_az) < 1e-5,
+          (ax, az))
+finally:
+    nctl._object_mode()
+
+# ---- пальцы human-плана ПО ГЕОМЕТРИИ: analyze возвращает пути,
+# add_finger_chains кладёт кости НА пальцы меша
+res_f = nc.analyze(build_human_t(), base_spec=spec18, add_fingers=True)
+fps = res_f.get("fingers") or {}
+check("v2.10.1: analyze вернул пути пальцев (>=3 на сторону)",
+      len(fps.get("L", [])) >= 3 and len(fps.get("R", [])) >= 3,
+      {k: len(v) for k, v in fps.items()})
+
+arm_f = neuro_rig.build_armature(res_f["spec"], name="NeuroCharF")
+n_fgeo = neuro_rig.add_finger_chains(arm_f, scale=res_f["h"] / 1.70,
+                                     finger_paths=fps)
+check("v2.10.1: пальцы по геометрии — 20 костей", n_fgeo == 20, n_fgeo)
+names_f = sorted(n for n in neuro_rig.finger_bone_names()
+                 if arm_f.data.bones.get(n) is not None)
+check("v2.10.1: имена пальцев те же (fng_thumb_1_L ...)",
+      len(names_f) == 20, names_f[:6])
+# кости пальцев лежат на точках кисти меша (пути из analyze — в мире;
+# точки меша = те же build_human_t, что анализировались)
+vs_f = build_human_t()
+worst_f = 0.0
+for n in neuro_rig.finger_bone_names():
+    eb = arm_f.data.edit_bones.get(n)
+    if eb is None:
+        continue
+    for pv in (eb.head, eb.tail):
+        p = np.array([pv.x, pv.y, pv.z])
+        dmin = float(np.min(np.linalg.norm(vs_f - p, axis=1)))
+        worst_f = max(worst_f, dmin)
+check("v2.10.1: кости пальцев на меше (худшая < 0.05 м)",
+      worst_f < 0.05, worst_f)
+
+# ---- x рук при рыскании: меш повернут на ~6°, кости руки должны
+# остаться НА руках (в 2.10.0 farm/uarm ставились на x-центр торса —
+# кисть уезжала на y*sin(yaw) ~ 8 см и пальцы повисали в воздухе)
+pts_yaw = nc._rotz(build_human_t(), 6.0)
+res_y = nc.analyze(pts_yaw, base_spec=spec18, add_fingers=False)
+spec_y = res_y["spec"]
+by_y = {l["name"]: l for l in spec_y["links"]}
+# фактический x-центр кисти L повернутого меша
+hand_y = pts_yaw[(pts_yaw[:, 1] > 0.72) & (pts_yaw[:, 2] > 1.30)]
+x_hand_y = float(hand_y[:, 0].mean()) if len(hand_y) else 1e9
+x_farm_y = float(by_y["farm_L"]["com"][0])
+check("v2.10.1: farm_L на фактической руке при yaw 6° (< 0.05)",
+      abs(x_farm_y - x_hand_y) < 0.05, (round(x_farm_y, 3),
+                                        round(x_hand_y, 3)))
+# при yaw 6° старый режим давал бы |xc - x_hand| ~ 0.076
+check("v2.10.1: рук-сдвиг реально был бы (регрессия ловится)",
+      abs(0.0 - x_hand_y) > 0.03, round(x_hand_y, 3))
+
+# ---- fitted-ноги: разрыв хвоста голени до щиколотки -> 2 хелпера на
+# ногу (IK-цепь больше не короче ноги на пол-голени)
+arm_y = neuro_rig.build_armature(spec_y, name="NeuroCharY")
+rep_y = nctl.build_controls(arm_y, ik_on=False, fingers=False,
+                            poles=False)
+n_hlp_y = sum(1 for b in arm_y.data.bones
+              if b.name.startswith(("NCPK_Foot_", "NCPK_Arm_")))
+check("v2.10.1: fitted-ноги получили IK-хелперы (>= 4)",
+      n_hlp_y >= 4, n_hlp_y)
+ik_pairs = [(pb.name, c.subtarget) for pb in arm_y.pose.bones
+            for c in pb.constraints if c.type == "IK"]
+check("v2.10.1: IK ноги на хелпере NCPK_*",
+      any(n.startswith("NCPK_") for n, _s in ik_pairs), ik_pairs)
+
+print()
 
 # ============================================= G. vendor All-in-One
 v_img3d = os.path.join(ADDON, "vendor", "img3d")

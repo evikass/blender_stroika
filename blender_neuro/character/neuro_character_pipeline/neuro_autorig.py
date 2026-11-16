@@ -300,10 +300,35 @@ def analyze_humanoid(pts):
             ez = shoulder_z
         if wz is None:
             wz = ez
-        return elbow_y, ez, wrist_y, wz
+        # x-центр ЭТОЙ руки (v2.10.1): остовные кости плечо/предплечье/
+        # запястье раньше ставились на x-центр ТОРСА (xc) — при любом
+        # рыскании канонического кадра (ложный yaw от асимметрии стоп/
+        # причёски, пара градусов) кисть уходит вбок на y*sin(yaw)
+        # (руки на размахе 0.8 м — сдвиг до 4-5 см) и кости кистей
+        # повисали в воздухе рядом с пальцами. Мерием фактический
+        # x руки в полосах локтя/запястья/плеча.
+        sv = av[np.sign(av[:, 1]) == side]
 
-    elL_y, elL_z, wrL_y, wrL_z = arm_pts(+1)
-    elR_y, elR_z, wrR_y, wrR_z = arm_pts(-1)
+        def _med_x(lo, hi):
+            yy = np.abs(sv[:, 1])
+            sel = (yy >= lo) & (yy <= hi)
+            if sel.sum() < 5:
+                return None
+            return float(np.median(sv[sel, 0]))
+
+        ex = _med_x(elbow_y - 0.06 * h, elbow_y + 0.06 * h)
+        wx = _med_x(wrist_y - 0.05 * h, yh)
+        sx = _med_x(y_sh * 1.05, y_sh * 1.05 + 0.10 * h)
+        if ex is None:
+            ex = xc
+        if wx is None:
+            wx = ex
+        if sx is None:
+            sx = xc
+        return elbow_y, ez, wrist_y, wz, sx, ex, wx
+
+    elL_y, elL_z, wrL_y, wrL_z, shL_x, elL_x, wrL_x = arm_pts(+1)
+    elR_y, elR_z, wrR_y, wrR_z, shR_x, elR_x, wrR_x = arm_pts(-1)
 
     # ---- толщина руки (для радиусов костей): вертикальный размах рук
     # в полосе середины плеча
@@ -346,6 +371,9 @@ def analyze_humanoid(pts):
         "elbowR_y": -(elR_y) + yc, "elbowR_z": elR_z,
         "wristL_y": wrL_y + yc, "wristL_z": wrL_z,
         "wristR_y": -(wrR_y) + yc, "wristR_z": wrR_z,
+        "shL_x": shL_x, "shR_x": shR_x,
+        "elbowL_x": elL_x, "elbowR_x": elR_x,
+        "wristL_x": wrL_x, "wristR_x": wrR_x,
         "handL_y": y_handL, "handR_y": y_handR,
         "neck_z": neck_z, "head_top_z": z1,
         "w_torso": w_torso, "arm_th": arm_th, "note": arm_note,
@@ -439,17 +467,24 @@ def build_fitted_spec(base_spec, lm):
         el_z = lm["elbow%s_z" % sfx]
         wr_y = lm["wrist%s_y" % sfx]
         wr_z = lm["wrist%s_z" % sfx]
+        # фактический x руки (v2.10.1): при рыскании канонического
+        # кадра кисть уходит от xc на y*sin(yaw) — до 4-5 см на
+        # размахе; кости руки должны сидеть НА руке, а не на оси
+        # торса (см. arm_pts в analyze_humanoid)
+        sx = lm.get("sh%s_x" % sfx, xc)
+        ex = lm.get("elbow%s_x" % sfx, xc)
+        wx = lm.get("wrist%s_x" % sfx, xc)
         link("shoulderP_" + sfx,
-             [xc, sgn * 0.55 * lm["y_sh"], sh_z],
-             [xc, sgn * 0.28 * lm["y_sh"], sh_z],
+             [sx, sgn * 0.55 * lm["y_sh"], sh_z],
+             [sx, sgn * 0.28 * lm["y_sh"], sh_z],
              {"type": "capsule", "axis": "y",
               "radius": 0.30 * r_uarm, "half_len": 0.14 * lm["y_sh"]})
-        link("uarm_" + sfx, [xc, el_y, el_z],
-             [xc, sgn * lm["y_sh"], sh_z],
+        link("uarm_" + sfx, [ex, el_y, el_z],
+             [sx, sgn * lm["y_sh"], sh_z],
              {"type": "capsule", "axis": "y", "radius": r_uarm,
               "half_len": max(0.5 * abs(el_y - sgn * lm["y_sh"]),
                               0.05 * h)})
-        link("farm_" + sfx, [xc, wr_y, wr_z], [xc, el_y, el_z],
+        link("farm_" + sfx, [wx, wr_y, wr_z], [ex, el_y, el_z],
              {"type": "capsule", "axis": "y", "radius": r_farm,
               "half_len": max(0.5 * abs(wr_y - el_y), 0.05 * h)})
         link("hipR_" + sfx, [xc, sgn * 0.8 * abs(yh), hip_z],

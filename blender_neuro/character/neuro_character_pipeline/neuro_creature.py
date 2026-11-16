@@ -871,7 +871,15 @@ def _split_1d(vals, min_gap):
 def _count_fingers(P, p_root, p_tip, h):
     """Число пальцев: стойкие кластеры в сечениях дистальной части.
 
-    Возвращает (n, fingers): fingers — пути [(p_a, p_b, p_tip)]."""
+    Возвращает (n, fingers): fingers — пути [(p_a, p_b, p_tip)].
+
+    v2.10.1: работает парой с устойчивым кончиком кисти в
+    _human_finger_paths (среднее топ-15% дальних точек вдоль оси
+    руки) и фактическим x руки (analyze_humanoid.arm_pts): раньше
+    кончик выбирался «самой далёкой точкой» и наклонял ось кисти в
+    бок — срезы шли ПОПЕРЁК пальцев, патчи сливались в один
+    кластер, детект молча давал 1 трек и включался веер («кости у
+    пальцев не совпадают с пальцами»)."""
     p_root = np.asarray(p_root, dtype=float)
     p_tip = np.asarray(p_tip, dtype=float)
     d = p_tip - p_root
@@ -1036,6 +1044,86 @@ def _chain_spec(out, names, anchors, coms, radii, dirs, base_parent=None):
         prev = nm
 
 
+def _human_finger_paths(arms, lm, xc, h):
+    """Пути пальцев human-плана ПО ГЕОМЕТРИИ (канонический кадр).
+
+    Для каждой руки: запястье из landmarks (wristL/wristR), кончик
+    кисти — самая далёкая от плеча точка руки; между ними
+    _count_fingers ищет реальные пальцы (кластеры в сечениях).
+    Возвращает dict("L"/"R" -> [(p_a, p_b, p_tip), ...]) — пути
+    ([основание, середина, кончик]); сторона без пальцев (варежка,
+    слипшиеся пальцы, <3 треков) даёт пустой список — тогда
+    add_finger_chains рисует стандартный веер."""
+    out = {}
+    if lm is None:
+        return {"L": [], "R": []}
+    for sfx in ("L", "R"):
+        try:
+            wy = float(lm["wrist%s_y" % sfx])
+            wz = float(lm["wrist%s_z" % sfx])
+            ey = float(lm["elbow%s_y" % sfx])
+            ez = float(lm["elbow%s_z" % sfx])
+        except KeyError:
+            out[sfx] = []
+            continue
+        # x запястья/локтя этой руки (v2.10.1 — см. analyze_humanoid.
+        # arm_pts): ось руки по ФАКТИЧЕСКИМ точкам, а не по x-центру
+        # торса — иначе срезы кисти идут мимо пальцев
+        wx = float(lm.get("wrist%s_x" % sfx, xc))
+        exx = float(lm.get("elbow%s_x" % sfx, xc))
+        wr = np.array([wx, wy, wz])
+        sgn = 1.0 if sfx == "L" else -1.0
+        blob = None
+        for w in arms:
+            if float(w.get("side", 0.0)) * sgn > 0:
+                blob = w
+                break
+        if blob is None or len(blob.get("P", [])) < 30:
+            out[sfx] = []
+            continue
+        P = np.asarray(blob["P"], dtype=float)
+        # ось РУКИ из локтя -> запястье: канонический yaw крутит тело
+        # вокруг МИРА, кисть уезжает вбок (y*sin(yaw)) — евклидов
+        # «самый далёкий» кончик показывал в бок кисти, срезы шли
+        # ПОПЕРЁК пальцев и детект давал 1 трек (v2.10.1)
+        d_arm = wr - np.array([exx, ey, ez])
+        n_arm = float(np.linalg.norm(d_arm))
+        if n_arm < 1e-6:
+            d_arm = np.array([0.0, sgn, 0.0])
+            n_arm = 1.0
+        d_arm = d_arm / n_arm
+        tt = (P - wr) @ d_arm
+        sel = P[tt > 0.02 * h]            # кисть = дальше запястья
+        if len(sel) < 30:
+            out[sfx] = []
+            continue
+        # кончик кисти — среднее ТОП-15% дальних вдоль оси руки точек
+        # (одна случайная крайняя точка наклоняла ось кисти и срезы
+        # шли под углом к пальцам — v2.10.1)
+        dd = (sel - wr) @ d_arm
+        k = max(5, int(0.15 * len(sel)))
+        top = sel[np.argsort(-dd)[:k]]
+        tip = top.mean(axis=0)
+        n_f, fpaths = _count_fingers(P, wr, tip, h)
+        out[sfx] = [tuple(map(tuple, fp)) for fp in fpaths] \
+            if n_f >= 3 else []
+    return out
+
+
+def _rotz_fingers(fingers, deg):
+    """Пути пальцев из канонического кадра в мировые координаты."""
+    if not fingers:
+        return fingers
+    out = {}
+    for sfx, paths in fingers.items():
+        moved = []
+        for fp in paths:
+            pts = _rotz(np.asarray(fp, dtype=float), deg)
+            moved.append(tuple(tuple(p) for p in pts))
+        out[sfx] = moved
+    return out
+
+
 # --------------------------------------------------------------- анализ
 
 def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
@@ -1135,6 +1223,13 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
                 # весь Auto-Rig: строим универсального двуногого
                 notes.append("human-контракт не собрался (%s)" % e)
             else:
+                # v2.10.1: пальцы human-плана — ПО ГЕОМЕТРИИ, а не
+                # веером от запястья (жалоба: «кости у пальцев не
+                # совпадают с пальцами»). _count_fingers ищет
+                # реальные кластеры пальцев в сечениях кисти — те же
+                # треки, что у creature-планов; пути кисти отдадим
+                # add_finger_chains (fan остаётся запасным вариантом).
+                fingers = _human_finger_paths(arms, lm, lm["xc"], h)
                 face_rep = "лицо определено" if face_known else \
                     "лицо НЕ определено (знак вперёд/назад не гарантирован)"
                 return {
@@ -1144,6 +1239,7 @@ def analyze(pts, base_spec=None, plan="AUTO", add_fingers=True):
                                "и анимация neurosim доступны; %s" % face_rep),
                     "joints": _rotz_joints(joints, -yaw),
                     "notes": notes,
+                    "fingers": _rotz_fingers(fingers, -yaw),
                 }
 
     if plan == "HUMAN":

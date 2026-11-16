@@ -815,7 +815,7 @@ def _build(context, region):
         y[0] -= 3.0
 
     rule()
-    ver = "2.10.0"
+    ver = "2.10.1"
     try:
         if pkg is not None and getattr(pkg, "bl_info", None):
             ver = ".".join(str(v) for v in pkg.bl_info["version"])

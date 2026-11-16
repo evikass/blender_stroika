@@ -65,6 +65,7 @@ neuro_creature.analyze), поэтому слой работает для люб�
 человек, четвероногий, птица, дракон, двуногий с хвостом.
 """
 import math
+import os
 import re
 
 import bpy
@@ -179,10 +180,14 @@ def _dot(a, b):
 
 
 def _cross(a, b):
-    """Векторное произведение по компонентам (работает и со стабом)."""
-    return Vector(a.y * b.z - a.z * b.y,
-                  a.z * b.x - a.x * b.z,
-                  a.x * b.y - a.y * b.x)
+    """Векторное произведение по компонентам (работает и со стабом).
+
+    Blender 4+ требует единственный аргумент-последовательность:
+    Vector((x, y, z)) — Vector(x, y, z) кидает TypeError
+    «takes at most 1 argument» (урок v2.10.1)."""
+    return Vector((a.y * b.z - a.z * b.y,
+                   a.z * b.x - a.x * b.z,
+                   a.x * b.y - a.y * b.x))
 
 
 def _side_of(chain_names):
@@ -411,7 +416,11 @@ def _set_color(pb, rgba):
 
 
 def _assign_coll(data, bone_name, coll_name):
-    """Bone collections (Blender 4+); старые версии и стабы — молча нет."""
+    """Bone collections (Blender 4+); старые версии и стабы — молча нет.
+
+    assign() принимает ОБЪЕКТ кости (Bone/EditBone); строка имени на
+    Blender 4.1+/5.x кидает TypeError и кость молча оставалась вне
+    коллекций (урок v2.10.1: коллекции создавались пустыми)."""
     try:
         colls = data.collections
     except AttributeError:
@@ -420,7 +429,12 @@ def _assign_coll(data, bone_name, coll_name):
         coll = colls.get(coll_name)
         if coll is None:
             coll = colls.new(coll_name)
-        coll.assign(bone_name)
+        bone = data.bones.get(bone_name)
+        if bone is None:
+            bone = data.edit_bones.get(bone_name)
+        if bone is None:
+            return
+        coll.assign(bone)
     except Exception:
         pass
 
@@ -464,10 +478,20 @@ def _bone_axes(eb):
     """(X, Z) оси кости в пространстве арматуры (из матрицы кости).
 
     Нужны для pole_angle: Blender сгибает 2-бонную IK-цепь в
-    направлении up(theta) = X*cos(theta) + Z*sin(theta)."""
+    направлении up(theta) = X*cos(theta) + Z*sin(theta).
+    Blender 4.0+: EditBone.matrix — 4x4 (колонки 4-компонентные),
+    оси берём элементами m[r][c] — работает и для 3x3 старых
+    версий, и для 4x4 новых (урок v2.10.1: m.col[0] на Blender 4+
+    давал 4D-вектор и ронял весь слой рычагов с AttributeError
+    «vectors must have the same dimensions» — пользователь видел
+    скелет без единого рычага и молчание вместо ошибки)."""
     try:
         m = eb.matrix
-        return m.col[0], m.col[2]
+        ax = Vector((m[0][0], m[1][0], m[2][0]))
+        az = Vector((m[0][2], m[1][2], m[2][2]))
+        if ax.length < 1e-9 or az.length < 1e-9:
+            return None, None
+        return ax.normalized(), az.normalized()
     except Exception:
         return None, None
 
@@ -676,8 +700,16 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
             if b1 is None or b2 is None:
                 ch["ik_host"] = ikn
                 continue
+            # разрыв 1: между костями (com-якорный остов);
+            # разрыв 2: хвост второй кости НЕ ДОХОДИТ до якоря
+            # (fitted-спека 2.3.0: thigh = бедро->колено ЦЕЛИКОМ,
+            #  shin = колено->середина голени ПОЛОВИНА — IK-цепь
+            #  [thigh, shin] была короче ноги на пол-голени и
+            #  рычаг ступни тянул колено вниз вместо сгиба;
+            #  урок v2.10.1 — проверять ОБА разрыва)
             gap = float((b2.head - b1.tail).length)
-            if gap <= 0.02 * h:
+            gap2 = float((ch["anchor"] - b2.tail).length)
+            if gap <= 0.02 * h and gap2 <= 0.02 * h:
                 ch["ik_host"] = ikn        # кости уже сустав-в-сустав
                 continue
             hname = ch["handle"] or "CTRL_Limb"
@@ -705,8 +737,15 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
                 ch["ik_host"] = [n1, n2]
                 ch["hlp_map"] = ((ikn[0], n1), (ikn[1], n2))
                 helpers_made += 2
-            except Exception:
+            except Exception as _e:
+                if os.environ.get("NCP_DEBUG"):
+                    print("HLP FAIL %s: %s" % (n1, _e))
                 ch["ik_host"] = ikn
+        if os.environ.get("NCP_DEBUG"):
+            for ch in chains:
+                print("DBG chain", ch["kind"], ch.get("side"),
+                      "host=", ch.get("ik_host"),
+                      "ikn=", ch.get("ik_names"))
 
         # -- полюсы коленей/локтей: только 2-бонные leg/arm цепи
         if poles:
@@ -862,6 +901,7 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
                 _set_shape(pb, "ring" if kind == "root" else "disc",
                            0.17 * h if kind == "root" else 0.12 * h)
                 _set_color(pb, _KIND_COLOR[kind])
+                _assign_coll(arm_obj.data, name, "NCP_Controls")
         except Exception:
             pass
     for name in made[2:]:

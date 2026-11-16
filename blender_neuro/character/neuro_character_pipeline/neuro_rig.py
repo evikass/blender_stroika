@@ -344,20 +344,28 @@ def finger_bone_names():
     return out
 
 
-def add_finger_chains(arm_obj, scale=1.0):
-    """По 10 костей пальцев от запястий farm_L/farm_R — В ПЛОСКОСТИ
-    ЛАДОНИ.
+def add_finger_chains(arm_obj, scale=1.0, finger_paths=None):
+    """По 10 костей пальцев от запястий farm_L/farm_R.
 
-    neuro-контракт: лицо +X, руки в T-pose вдоль ±Y, ладони вниз.
-    Направление пальцев = вдоль предплечья (arm_dir); веер расходится
-    поперёк руки в горизонтали, развёрнутой к лицу (+X): большой
-    палец вперёд, мизинец назад; лёгкий прогиб всех пальцев вниз
-    (третье число плана — положительный прогиб в метрах).
-    Это даёт анатомичную кисть и в T-pose, и в A-pose (направления
-    считаются от фактической кости farm_*, а не захардкожены).
-    neuro-анимация (apply_animation) ведёт только кости спеки, пальцы
-    просто едут вместе с рукой — на контракт нейросима не влияют.
-    scale — множитель размеров (рост персонажа / 1.70 м)."""
+    v2.10.1: если переданы finger_paths (dict "L"/"R" -> пути
+    [(p_a, p_b, p_tip), ...] из геометрии меша — neuro_creature.
+    _human_finger_paths), кости кладутся ПО ФАКТИЧЕСКИМ пальцам:
+    основание/середина/кончик каждого найденного пальца (нужно
+    ровно 5 путей на сторону — иначе веер). Имена те же, порядок
+    большой->мизинец — по проекции середины пальца на ось «к лицу»
+    (+X, как у веера). Это чинит жалобу «кости у пальцев не
+    совпадают с пальцами»: веер рисовал стандартную ладонь, а у
+    реального персонажа пальцы растут под своим углом.
+
+    Веер (без геометрии): нейро-контракт, лицо +X, руки в T-pose
+    вдоль ±Y, ладони вниз. Направление пальцев = вдоль предплечья
+    (arm_dir); веер расходится поперёк руки в горизонтали,
+    развёрнутой к лицу (+X): большой палец вперёд, мизинец назад;
+    лёгкий прогиб всех пальцев вниз. Направления считаются от
+    фактической кости farm_* (анатомично в T-pose и A-pose).
+    neuro-анимация (apply_animation) ведёт только кости спеки,
+    пальцы просто едут вместе с рукой. scale — множитель размеров
+    веера (рост персонажа / 1.70 м); пути геометрии не масштабируются."""
     arm_data = arm_obj.data
     try:
         bpy.ops.object.mode_set(mode="OBJECT")
@@ -390,7 +398,62 @@ def add_finger_chains(arm_obj, scale=1.0):
         droop = Vector((0.0, 0.0, -1.0))
         droop = droop - arm_dir * droop.dot(arm_dir)
         droop = droop.normalized() if droop.length > 1e-6 else None
-        # база — сразу за запястьем (хвост farm = точка кисти)
+        # -- v2.10.1: пальцы по геометрии (ровно 5 путей на сторону)
+        paths = None
+        if finger_paths:
+            try:
+                cand = list(finger_paths.get(side) or [])
+            except AttributeError:
+                cand = []
+            if len(cand) == 5:
+                # порядок большой->мизинец: ось развода пальцев из
+                # самих путей (PCA векторов середина-запястье без
+                # компоненты вдоль руки), ориентация «к лицу» (+X);
+                # у ладони, стоящей ребром (развод вертикальный),
+                # большой палец сверху — ориентир вверх (+Z)
+                wr = Vector(eb_p.tail)
+                mids = []
+                for fp in cand:
+                    w = 0.5 * (Vector(fp[0]) + Vector(fp[2])) - wr
+                    mids.append(w - arm_dir * w.dot(arm_dir))
+                cov = [[0.0] * 3 for _ in range(3)]
+                for w in mids:
+                    for i in range(3):
+                        for j in range(3):
+                            cov[i][j] += w[i] * w[j]
+                e = Vector((1.0, 0.0, 0.0))
+                for _ in range(24):
+                    ne = Vector(tuple(
+                        sum(cov[i][j] * e[j] for j in range(3))
+                        for i in range(3)))
+                    if ne.length < 1e-12:
+                        break
+                    e = ne.normalized()
+                if e.dot(Vector((1.0, 0.0, 0.0))) < 0.0:
+                    e = -e
+                if abs(e.dot(Vector((1.0, 0.0, 0.0)))) < 0.4 and \
+                        e.dot(Vector((0.0, 0.0, 1.0))) < 0.0:
+                    e = -e
+                cand.sort(
+                    key=lambda fp: -(0.5 * (Vector(fp[0]) + Vector(fp[2]))
+                                     - wr).dot(e))
+                paths = cand
+        if paths is not None:
+            parent = eb_p
+            for (fname, _op, _od, _ln), fp in zip(FINGER_PLAN, paths):
+                p0, p1, p2 = (Vector(fp[0]), Vector(fp[1]), Vector(fp[2]))
+                for seg, (a, b) in enumerate(((p0, p1), (p1, p2))):
+                    if (b - a).length < 1e-6:
+                        continue
+                    eb = arm_data.edit_bones.new(
+                        "fng_%s_%d_%s" % (fname, seg + 1, side))
+                    eb.head, eb.tail = a, b
+                    eb.roll = 0.0
+                    eb.parent = parent
+                    parent = eb
+                    made += 1
+            continue
+        # -- веер: стандартная ладонь (геометрия пальцев не нашлась)
         base = eb_p.tail + arm_dir * (0.02 * scale)
         for fname, off_p, off_d, ln in FINGER_PLAN:
             head = base + spread * (off_p * scale)
