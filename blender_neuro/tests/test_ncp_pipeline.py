@@ -488,11 +488,25 @@ bpy.context = types.SimpleNamespace(
     preferences=types.SimpleNamespace(addons={}),
     mode="OBJECT")
 bpy.path = types.SimpleNamespace(abspath=lambda p: p)
+
+# ---- таймеры с записью (ncp_overlay держит на них keep-alive)
+_TIMERS = []
+
+
+def _timer_register(fn, *a, **k):
+    _TIMERS.append(fn)
+
+
+def _timer_unregister(fn):
+    if fn in _TIMERS:
+        _TIMERS.remove(fn)
+
+
 bpy.app = types.SimpleNamespace(
     timers=types.SimpleNamespace(
-        is_registered=lambda f: False,
-        register=lambda *a, **k: None,
-        unregister=lambda *a, **k: None),
+        is_registered=lambda f: f in _TIMERS,
+        register=_timer_register,
+        unregister=_timer_unregister),
     handlers=types.SimpleNamespace(depsgraph_update_post=[]),
     version=(5, 4, 0),
     driver_namespace={})
@@ -564,6 +578,78 @@ bpy.utils = types.SimpleNamespace(
     unregister_class=lambda c: None,
     previews=types.SimpleNamespace(new=lambda: None))
 
+# ---- draw handler SpaceView3D (карточка NCP)
+_DRAWS = []
+
+
+def _draw_handler_add(fn, args, space, region):
+    h = (fn, args, space, region)
+    _DRAWS.append(h)
+    return h
+
+
+def _draw_handler_remove(h, region):
+    if h in _DRAWS:
+        _DRAWS.remove(h)
+
+
+bpy.types.SpaceView3D.draw_handler_add = staticmethod(_draw_handler_add)
+bpy.types.SpaceView3D.draw_handler_remove = staticmethod(
+    _draw_handler_remove)
+
+# ---- стаб blf/gpu (ncp_overlay рисует карточку gpu + blf)
+blf = types.ModuleType("blf")
+_BLF_SIZE = {"size": 12}
+
+
+def _blf_size(fid, size, *a, **k):
+    _BLF_SIZE["size"] = float(size)
+
+
+def _blf_dimensions(fid, text, *a, **k):
+    s = _BLF_SIZE["size"]
+    return (len(str(text)) * s * 0.55, s)
+
+
+blf.size = _blf_size
+blf.color = lambda *a, **k: None
+blf.position = lambda *a, **k: None
+blf.draw = lambda *a, **k: None
+blf.dimensions = _blf_dimensions
+sys.modules["blf"] = blf
+
+
+def _fake_shader(name):
+    return types.SimpleNamespace(
+        bind=lambda: None,
+        uniform_float=lambda *a, **k: None)
+
+
+gpu = types.ModuleType("gpu")
+gpu.state = types.SimpleNamespace(
+    blend_set=lambda *a: None,
+    line_width_set=lambda *a: None,
+    viewport_get=lambda: (0, 0, 100, 100))
+gpu.shader = types.SimpleNamespace(from_builtin=_fake_shader)
+gpu.types = types.SimpleNamespace(Buffer=lambda *a, **k: None,
+                                 GPUTexture=lambda *a, **k: None)
+sys.modules["gpu"] = gpu
+
+gpu_extras = types.ModuleType("gpu_extras")
+_batch_mod = types.ModuleType("gpu_extras.batch")
+
+
+def _batch_for_shader(shader, prim, content, **k):
+    pos = list(content.get("pos", []))
+    return types.SimpleNamespace(prim=prim, pos=pos,
+                                 draw=lambda s=None: None)
+
+
+_batch_mod.batch_for_shader = _batch_for_shader
+gpu_extras.batch = _batch_mod
+sys.modules["gpu_extras"] = gpu_extras
+sys.modules["gpu_extras.batch"] = _batch_mod
+
 sys.modules["bpy"] = bpy
 sys.modules["bpy.props"] = bpy.props
 sys.modules["bpy.types"] = bpy.types
@@ -586,6 +672,7 @@ import neuro_autorig  # noqa: E402
 import neuro_creature as nc  # noqa: E402
 import neuro_controls as nctl  # noqa: E402
 import ncp_comfy  # noqa: E402
+import ncp_overlay as ov  # noqa: E402
 
 import numpy as np  # noqa: E402
 
@@ -1393,6 +1480,114 @@ sp_rt = nc._rotz_spec(nc._rotz_spec(sp, 37.0), -37.0)
 err_rt = np.abs(spec_coms(sp_rt) - spec_coms(sp)).max()
 check("_rotz_spec round-trip (coms)", err_rt < 1e-3, err_rt)
 
+# =================================== F0. GPU-оверлей (ncp_overlay)
+check("ncp_overlay: CLASSES — оператор/свитч/вкладка",
+      [c.__name__ for c in ov.CLASSES] ==
+      ["NCP_OT_overlay", "NCP_OT_ui_switch", "NCP_PT_tab"],
+      [c.__name__ for c in ov.CLASSES])
+check("карточка держит вкладку NCP",
+      ov.NCP_PT_tab.bl_category == "NCP" and
+      "HIDE_HEADER" in ov.NCP_PT_tab.bl_options)
+check("оператор мыши — ncp.card",
+      ov.NCP_OT_overlay.bl_idname == "ncp.card")
+check("панели прячутся только у живой карточки",
+      ov.panels_off() is False)
+ov._state["handle"] = object()
+check("панели прячутся только у живой карточки",
+      ov.panels_off() is True)
+ov._state["failed"] = True
+check("панели возвращаются при падении карточки",
+      ov.panels_off() is False)
+ov._state["failed"] = False
+ov._state["handle"] = None
+
+_w = [{"kind": "label", "rect": (0, 0, 0, 0)},
+      {"kind": "chip", "rect": (10, 10, 80, 26), "act": ("tab", "gen")},
+      {"kind": "stat", "rect": (0, 40, 250, 90)},
+      {"kind": "xbtn", "over": True, "rect": (220, 110, 16, 16),
+       "act": ("op", "ncp.cancel")}]
+check("hit: кнопка находится", ov._hit(_w, 30, 20) == 1)
+check("hit: label пропускается", ov._hit(_w, 5, 5) is None)
+check("hit: stat не кликабелен", ov._hit(_w, 100, 60) is None)
+check("hit: over-кнопка поверх статуса", ov._hit(_w, 228, 118) == 3)
+
+rr = ov._round_rect(0, 0, 100, 40, 8)
+check("round_rect: треугольники внутри прямоугольника",
+      rr and all(-0.01 <= x <= 100.01 and -0.01 <= y <= 40.01
+                 for x, y in rr) and len(rr) % 3 == 0,
+      len(rr))
+
+ov._CLIP[0] = (10.0, 50.0)
+check("clip: внутри полосы — как есть", ov._clip_y(20, 10) == (20, 10))
+check("clip: пересечение сверху обрезано", ov._clip_y(0, 30) == (10, 20))
+check("clip: вне полосы — None", ov._clip_y(60, 10) is None)
+check("inside: высота учитывается",
+      ov._inside(10, 40) and not ov._inside(9, 42))
+ov._CLIP[0] = None
+
+lines = ov._wrap("один два три четыре пять шесть семь", 60.0, 11, 1.0)
+check("wrap: длинный текст переносится", len(lines) >= 2, lines)
+
+owner = types.SimpleNamespace(ctrl_ik=True, quality="FAST", fake=False)
+ov._state["tab"] = "gen"
+ctx = types.SimpleNamespace(scene=None)
+ov._fire(ctx, {"act": ("prop", (owner, "ctrl_ik"))})
+check("fire: prop переключает", owner.ctrl_ik is False)
+ov._fire(ctx, {"act": ("enum", (owner, "quality", "HIGH"))})
+check("fire: enum ставит значение", owner.quality == "HIGH")
+ov._fire(ctx, {"act": ("tab", "pose")})
+check("fire: tab переключает вкладку и сбрасывает скролл",
+      ov._state["tab"] == "pose" and ov._state["scroll"] == 0.0)
+ov._state["tab"] = "gen"
+
+_fired = []
+bpy.ops.ncp = types.SimpleNamespace(set_mode=lambda *a, **k: _fired.append(k) or {"FINISHED"})
+bpy.ops.ncp.set_mode.poll = lambda: True
+ov._state["hot"] = None
+ov._state["hot_area"] = None
+ctx2 = types.SimpleNamespace(scene=None, active_object=None)
+ov._fire(ctx2, {"act": ("mode", "TPOSE")})
+check("fire: mode уходит в таймер", len(_TIMERS) == 1, len(_TIMERS))
+if _TIMERS:
+    _TIMERS[0]()
+check("fire: ncp.set_mode запущен с mode=TPOSE",
+      _fired and _fired[0].get("mode") == "TPOSE", _fired)
+_timers_snapshot = list(_TIMERS)
+for f in _timers_snapshot:
+    _timer_unregister(f)
+
+opless = types.SimpleNamespace(scene=None, active_object=None)
+ops_saved = bpy.ops.ncp
+bpy.ops.ncp = types.SimpleNamespace()
+ov._fire(opless, {"act": ("op", "ncp.rebuild_handles")})
+check("fire: нет оператора — say(), без таймера",
+      ov._state["note"] is not None and len(_TIMERS) == 0,
+      (ov._state["note"], len(_TIMERS)))
+ov._state["note"] = None
+bpy.ops.ncp = ops_saved
+
+_src = open(os.path.join(ADDON, "ncp_overlay.py"), encoding="utf-8").read()
+import re as _re
+_used = set(_re.findall(r'tip="(\w+)"', _src))
+_miss = sorted(_used - set(ov.TIPS))
+check("tips: все ключи подсказок описаны", not _miss, _miss)
+check("tips: минимум подсказок", len(ov.TIPS) >= 20, len(ov.TIPS))
+
+ov.say("тест-строка")
+check("say: заметка на карточке",
+      ov._state["note"] is not None and ov._state["note"][0] == "тест-строка")
+ov._state["note"] = None
+
+ov.register()
+check("register: draw handler поднят",
+      ov._state["handle"] is not None and len(_DRAWS) == 1)
+check("register: keep-alive таймер",
+      ov._keep_alive in _TIMERS)
+ov.unregister()
+check("unregister: хэндлер и таймеры сняты",
+      ov._state["handle"] is None and not _DRAWS and
+      ov._keep_alive not in _TIMERS)
+
 # ==================================== F. аддон: версия, классы, пропсы
 spec_imp = importlib.util.spec_from_file_location(
     "neuro_character_pipeline", os.path.join(ADDON, "__init__.py"),
@@ -1401,7 +1596,7 @@ pkg = importlib.util.module_from_spec(spec_imp)
 sys.modules["neuro_character_pipeline"] = pkg
 spec_imp.loader.exec_module(pkg)
 
-check("bl_info version 2.9.0", pkg.bl_info["version"] == (2, 9, 0),
+check("bl_info version 2.10.0", pkg.bl_info["version"] == (2, 10, 0),
       pkg.bl_info["version"])
 cls_names = [c.__name__ for c in pkg.classes]
 check("NCP_OT_build_skeleton зарегистрирован",
@@ -1415,6 +1610,18 @@ check("v2.9.0: панель режима NCP_PT_modes + операторы set_m
       "NCP_PT_modes" in panels and "NCP_OT_set_mode" in cls_names and
       "NCP_OT_record_key" in cls_names)
 check("AddonPreferences класс есть", "NCP_AddonPrefs" in cls_names)
+prefs_ann = getattr(pkg.NCP_AddonPrefs, "__annotations__", {})
+check("pref overlay: галка GPU-карточки", "overlay" in prefs_ann)
+init_src = open(os.path.join(ADDON, "__init__.py"), encoding="utf-8").read()
+check("панели прячутся при карточке (_panels_hidden -> panels_off)",
+      "_panels_hidden" in init_src and "panels_off" in init_src)
+for _pc in (pkg.NCP_PT_status, pkg.NCP_PT_pipeline, pkg._NCPSubPanel,
+            pkg.NCP_PT_handles, pkg.NCP_PT_modes):
+    check("poll-прятки у панели %s" % _pc.__name__,
+          hasattr(_pc, "poll") and _pc.__name__ != "NCP_PT_scene")
+check("ncp_overlay зарегистрирован вместе с аддоном",
+      hasattr(pkg, "ncp_overlay") and
+      any(c.__name__ == "NCP_PT_tab" for c in pkg.ncp_overlay.CLASSES))
 ann = getattr(pkg.NCP_Props, "__annotations__", {})
 for p in ("auto_rig", "body_plan", "add_fingers", "orient_auto",
           "mesh_rot_x", "mesh_rot_z", "debug_landmarks",
@@ -1435,10 +1642,15 @@ check("Body plan enum: AUTO/HUMAN/QUADRUPED/WINGED_QUAD/BIRD/DRAGON",
                       "BIRD", "DRAGON"}, bp_ids)
 with open(os.path.join(ADDON, "blender_manifest.toml"), "rb") as f:
     man = tomllib.load(f)
-check("manifest version 2.9.0", man["version"] == "2.9.0",
+check("manifest version 2.10.0", man["version"] == "2.10.0",
       man["version"])
 with open(os.path.join(ADDON, "INSTALL_RU.txt"), encoding="utf-8") as f:
     install_txt = f.read()
+check("INSTALL_RU: секция 2.10.0 (GPU-карточка)",
+      "ЧТО НОВОГО В 2.10.0" in install_txt and
+      "GPU-карточка" in install_txt and
+      "панель" in install_txt and
+      "T-ПОЗА" in install_txt.upper())
 check("INSTALL_RU: секция 2.9.0 (кольца + режим + запись по слоям)",
       "ЧТО НОВОГО В 2.9.0" in install_txt and
       "кольц" in install_txt.lower() and
@@ -1454,6 +1666,76 @@ check("INSTALL_RU: секция 2.7.0 (рычаги)",
 check("INSTALL_RU: секция 2.6.0", "ЧТО НОВОГО В 2.6.0" in install_txt)
 check("INSTALL_RU: секция про пальцы/поворот (2.5.0)",
       "ЧТО НОВОГО В 2.5.0" in install_txt)
+
+# ==================================== F1. карточка: сборка всех вкладок
+_ncp_st = types.SimpleNamespace(
+    state="IDLE", status="тест статуса карточки",
+    sketch_path="", image_path="",
+    quality="HIGH", texture="2048", engine="TRELLIS",
+    orient_auto=True, auto_rig=True, add_fingers=True,
+    debug_landmarks=False, body_plan="AUTO",
+    rig_mode="ANIM", rec_auto=False,
+    rec_body=True, rec_arms=True, rec_legs=True,
+    rec_fingers=True, rec_wings=False,
+    ctrl_ik=True, ctrl_poles=True, ctrl_fingers=True,
+    ctrl_hide_deform=False)
+_ncp_ctx = types.SimpleNamespace(
+    scene=types.SimpleNamespace(ncp=_ncp_st), area=None,
+    preferences=types.SimpleNamespace(
+        system=types.SimpleNamespace(ui_scale=1.0)))
+_ncp_region = types.SimpleNamespace(width=1600.0, height=900.0)
+_saved_pkgfn = ov._pkg
+ov._pkg = lambda: pkg
+ov._state["note"] = ("готово", time.time())
+try:
+    for _tab in ("gen", "rig"):
+        ov._state["tab"] = _tab
+        _ws, _card = ov._build(_ncp_ctx, _ncp_region)
+        _kinds = set(it["kind"] for it in _ws)
+        check("card build %s: виджеты + ширлина карточки" % _tab,
+              len(_ws) > 8 and _card[2] == 284.0 and _card[3] > 200.0,
+              (len(_ws), _card))
+        check("card build %s: есть run и stat" % _tab,
+              {"run", "stat"} <= _kinds, _kinds)
+        check("card build %s: хит-тест по нулевой точке пуст" % _tab,
+              ov._hit(_ws, 0, 0) is None)
+    # вкладка Поза с ригом
+    _arm = FakeArmObj("NeuroCharacter", FakeArmature("NeuroCharacter"))
+    bpy.data.objects._dict["NeuroCharacter"] = _arm
+    ov._state["tab"] = "pose"
+    _ws, _card = ov._build(_ncp_ctx, _ncp_region)
+    _kinds = set(it["kind"] for it in _ws)
+    check("card build pose: switches режим/запись/рычаги",
+          _kinds == {"chip", "switch", "stat", "run", "label", "hint",
+                     "rule", "clabel", "linktext", "logo", "title", "sub"}
+          or {"chip", "switch", "stat"} <= _kinds, _kinds)
+    check("card build pose: чипы T-Поза/Анимация присутствуют",
+          any(it["kind"] == "chip" and it.get("act") == ("mode", "TPOSE")
+              for it in _ws) and
+          any(it["kind"] == "chip" and it.get("act") == ("mode", "ANIM")
+              for it in _ws))
+    check("card build pose: чипы слоёв записи",
+          sum(1 for it in _ws if it.get("act") in
+              (("prop", (_ncp_st, "rec_body")),
+               ("prop", (_ncp_st, "rec_arms")),
+               ("prop", (_ncp_st, "rec_legs")),
+               ("prop", (_ncp_st, "rec_fingers")),
+               ("prop", (_ncp_st, "rec_wings")))) == 5)
+    check("card build pose: строка-заметка вошла",
+          any(it["kind"] == "label" and it.get("color") == ov.ACCENT
+              for it in _ws))
+    del bpy.data.objects._dict["NeuroCharacter"]
+    # вкладка Поза без рига
+    ov._state["tab"] = "pose"
+    _ws, _card = ov._build(_ncp_ctx, _ncp_region)
+    check("card build pose без рига: подсказка, без run",
+          "Скелет ещё не построен" in
+          " ".join(it.get("text", "") for it in _ws) and
+          not any(it["kind"] == "run" for it in _ws))
+finally:
+    ov._pkg = _saved_pkgfn
+    ov._state["tab"] = "gen"
+    ov._state["note"] = None
 
 # ============================================= G. vendor All-in-One
 v_img3d = os.path.join(ADDON, "vendor", "img3d")

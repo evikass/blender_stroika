@@ -4,18 +4,23 @@ Neuro Character Pipeline — мастер-аддон, связывающий:
   ComfyUI (картинка) -> Image to 3D (меш) -> neuro-скелет (human.json)
   -> X-Muscle System (мышцы) -> neuro-анимация (motion JSON).
 
-N-панель 3D-вьюпорта, категория "NCP" (короткая вкладка); резервная
-панель — Properties -> Scene. Постоянные настройки (папка движка,
-URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences, не слетают.
+Интерфейс — GPU-карточка поверх вьюпорта в стиле Image to 3D
+(ncp_overlay.py, вкладка "NCP" сайдбара); классическая N-панель —
+запасной путь (галка в Preferences или кнопка "панель" на карточке).
+Резервная панель — Properties -> Scene. Постоянные настройки (папка
+движка, URL ComfyUI, python.exe для ComfyUI) — в AddonPreferences,
+не слетают.
 """
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 9, 0),
+    "version": (2, 10, 0),
     "blender": (4, 2, 0),
-    "location": "3D Viewport > N-panel > NCP | Properties > Scene",
+    "location": "3D Viewport > N-panel > NCP (GPU-карточка) | "
+                "Properties > Scene",
     "description": "All-in-One: картинка -> 3D-меш -> neuro-скелет -> "
-                   "мышцы -> анимация (движки вшиты)",
+                   "мышцы -> анимация (движки вшиты, GPU-карточка в "
+                   "стиле Image to 3D)",
     "category": "Rigging",
 }
 
@@ -42,6 +47,7 @@ if "ncp_comfy" in locals():  # reload при правках в текст-ред
     importlib.reload(neuro_autorig)
     importlib.reload(neuro_creature)
     importlib.reload(neuro_controls)
+    importlib.reload(ncp_overlay)
 else:
     from . import ncp_comfy
     from . import ncp_img3d
@@ -50,6 +56,7 @@ else:
     from . import neuro_autorig
     from . import neuro_creature
     from . import neuro_controls
+    from . import ncp_overlay
 
 
 # ------------------------------------------------------------ состояние
@@ -139,11 +146,20 @@ def _st(context):
     return context.scene.ncp
 
 
+def _card_say(text):
+    """Строку на GPU-карточку (если она поднята); молча вне Blender."""
+    try:
+        ncp_overlay.say(text)
+    except Exception:
+        pass
+
+
 def _finish(context, msg):
     JOB.update(active=False, phase="", next="", comfy=None)
     st = _st(context)
     st.state = "DONE"
     st.status = msg
+    _card_say(msg)
     for wm in (bpy.context.window_manager, ):
         if wm:
             for w in wm.windows:
@@ -156,6 +172,7 @@ def _fail(context, msg):
     st = _st(context)
     st.state = "ERROR"
     st.status = msg
+    _card_say(msg)
 
 
 # --------------------------------------------------- vendor (All-in-One)
@@ -903,9 +920,18 @@ class NCP_AddonPrefs(bpy.types.AddonPreferences):
         description="Для слабых компьютеров: качать по одному файлу и "
                     "медленнее, чтобы компьютер не подвисал во время "
                     "загрузки AI-моделей")
+    overlay: BoolProperty(
+        name="GPU-карточка вьюпорта", default=True,
+        description="Интерфейс конвейера рисуется поверх вьюпорта в "
+                    "стиле Image to 3D (вкладка NCP): статус, вкладки "
+                    "Модель/Скелет/Поза, T-Поза/Анимация, запись по "
+                    "слоям. Выключите, чтобы вернуть классическую "
+                    "N-панель")
 
     def draw(self, context):
         lay = self.layout
+        col = lay.column(align=True)
+        col.prop(self, "overlay")
         col = lay.column(align=True)
         col.prop(self, "engine_dir")
         row = col.row(align=True)
@@ -1872,12 +1898,25 @@ class _NCPGuard:
             self.layout.label(icon="ERROR")
 
 
+def _panels_hidden():
+    """GPU-карточка поднята — классические панели NCP уступают ей место.
+    Любая ошибка карточки возвращает панели (внутри panels_off)."""
+    try:
+        return ncp_overlay.panels_off()
+    except Exception:
+        return False
+
+
 class _NCPSubPanel(_NCPGuard, bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "NCP"
     bl_parent_id = "NCP_PT_pipeline"
     bl_options = {"DEFAULT_CLOSED"}
+
+    @classmethod
+    def poll(cls, context):
+        return not _panels_hidden()
 
 
 class NCP_PT_pipeline(_NCPGuard, bpy.types.Panel):
@@ -1887,6 +1926,10 @@ class NCP_PT_pipeline(_NCPGuard, bpy.types.Panel):
     bl_region_type = "UI"
     bl_category = "NCP"
     bl_order = 1
+
+    @classmethod
+    def poll(cls, context):
+        return not _panels_hidden()
 
     def _head(self, context):
         self.layout.label(icon="USER")
@@ -2031,7 +2074,8 @@ class NCP_PT_handles(_NCPSubPanel):
 
     @classmethod
     def poll(cls, context):
-        return bpy.data.objects.get("NeuroCharacter") is not None
+        return (not _panels_hidden()
+                and bpy.data.objects.get("NeuroCharacter") is not None)
 
     def _head(self, context):
         self.layout.label(icon="CON_KINEMATIC")
@@ -2064,7 +2108,8 @@ class NCP_PT_modes(_NCPSubPanel):
 
     @classmethod
     def poll(cls, context):
-        return bpy.data.objects.get("NeuroCharacter") is not None
+        return (not _panels_hidden()
+                and bpy.data.objects.get("NeuroCharacter") is not None)
 
     def _head(self, context):
         try:
@@ -2211,15 +2256,19 @@ class NCP_PT_settings(_NCPSubPanel):
 
 
 class NCP_PT_status(_NCPGuard, bpy.types.Panel):
-    """Панель-маяк: не трогает scene-пропсы, рисуется всегда.
-    Если вы видите только её — сломан остальной интерфейс, и кнопка
-    Env Report соберёт причину в файл ~/ncp_report.txt."""
+    """Панель-маяк: не трогает scene-пропсы. Прячется, когда жива
+    GPU-карточка; если вы видите только её — сломан остальной интерфейс,
+    и кнопка Env Report соберёт причину в файл ~/ncp_report.txt."""
     bl_label = "Neuro Character"
     bl_idname = "NCP_PT_status"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "NCP"
     bl_order = 0
+
+    @classmethod
+    def poll(cls, context):
+        return not _panels_hidden()
 
     def _head(self, context):
         self.layout.label(icon="USER")
@@ -2342,6 +2391,10 @@ def register():
         REGISTER_ERRORS.append("Scene.ncp: %s" % e)
     _disable_legacy()
     _register_vendor()
+    try:
+        ncp_overlay.register()   # GPU-карточка (вкладка NCP)
+    except Exception as e:
+        REGISTER_ERRORS.append("ncp_overlay: %s" % e)
     if REGISTER_ERRORS:
         print("[Neuro Pipeline] часть классов не поднялась (обычно виновата "
               "вторая копия аддона - перезапустите Blender после удаления "
@@ -2351,6 +2404,10 @@ def register():
 
 
 def unregister():
+    try:
+        ncp_overlay.unregister()   # хэндлер отрисовки + таймеры карточки
+    except Exception:
+        pass
     if bpy.app.timers.is_registered(_tick):
         bpy.app.timers.unregister(_tick)
     try:
