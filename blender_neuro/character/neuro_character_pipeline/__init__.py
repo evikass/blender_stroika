@@ -283,9 +283,13 @@ def _add_controls(context, arm):
             hide_deform=bool(st.ctrl_hide_deform),
             fingers=bool(st.ctrl_fingers), poles=bool(st.ctrl_poles))
         try:
-            # слои записи и режим — на арматуру (v2.9.0)
+            # слои записи и режим — на арматуру (v2.9.0); T-Поза в панели
+            # применяется сразу (IK выкл + rest), Анимация уважает галку IK
             neuro_controls.rec_set_state(arm, _rec_state_from_props(st))
-            arm["ncp_mode"] = "ANIM" if st.rig_mode == "ANIM" else "TPOSE"
+            if st.rig_mode == "TPOSE":
+                neuro_controls.set_mode(arm, "TPOSE")
+            else:
+                arm["ncp_mode"] = "ANIM"
         except Exception:
             pass
         return note
@@ -1219,6 +1223,10 @@ class NCP_OT_set_mode(bpy.types.Operator):
             rep = neuro_controls.set_mode(arm, self.mode)
             try:
                 st.rig_mode = self.mode   # update-колбэк идемпотентен
+            except Exception:
+                pass
+            try:
+                st.ctrl_ik = self.mode == "ANIM"  # панель 4b в курсе
             except Exception:
                 pass
             st.status = rep
