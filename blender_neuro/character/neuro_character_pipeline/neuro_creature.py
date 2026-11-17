@@ -869,17 +869,20 @@ def _split_1d(vals, min_gap):
 
 
 def _count_fingers(P, p_root, p_tip, h):
-    """Число пальцев: стойкие кластеры в сечениях дистальной части.
+    """Число пальцев: стойкие кластеры в сечениях ДИСТАЛЬНОЙ части
+    кисти (собственно пальцы), P — только точки кисти (дальше
+    запястья), не всей руки.
 
-    Возвращает (n, fingers): fingers — пути [(p_a, p_b, p_tip)].
+    Возвращает (n, fingers): fingers — пути [(p_base, p_mid, p_tip)].
 
-    v2.10.1: работает парой с устойчивым кончиком кисти в
-    _human_finger_paths (среднее топ-15% дальних точек вдоль оси
-    руки) и фактическим x руки (analyze_humanoid.arm_pts): раньше
-    кончик выбирался «самой далёкой точкой» и наклонял ось кисти в
-    бок — срезы шли ПОПЕРЁК пальцев, патчи сливались в один
-    кластер, детект молча давал 1 трек и включался веер («кости у
-    пальцев не совпадают с пальцами»)."""
+    v2.11.0: срезы только в зоне пальцев (f = 0.45..0.90 длины
+    кисти; раньше 0.35/0.55 попадали в ЛАДОНЬ, пальцы давали
+    всего 2 трека и отсеивались порогом len>=3 — детект молча
+    включал веер, «кости пальцев не совпадают»). Порог трека
+    снижен до 2 срезов; размер кластера хранится в треке и мусор
+    (мелкие брызги) отсеивается по размеру. Основание пальца и
+    кончик дотягиваются линейной экстраполяцией оси пальца
+    (срезы внутри ладони не видят отдельные пальцы)."""
     p_root = np.asarray(p_root, dtype=float)
     p_tip = np.asarray(p_tip, dtype=float)
     d = p_tip - p_root
@@ -888,11 +891,13 @@ def _count_fingers(P, p_root, p_tip, h):
         return 0, []
     d = d / L
     u = _perp(d)
+    if u is None:
+        u = np.array([1.0, 0.0, 0.0])
     v = np.cross(d, u)
     rel = P - p_root
     t = rel @ d
     tracks = {}
-    for f in (0.35, 0.55, 0.75, 0.93):
+    for f in (0.45, 0.60, 0.75, 0.90):
         sel = np.abs(t - f * L) < 0.06 * max(L, 0.02 * h)
         if int(sel.sum()) < 10:
             continue
@@ -900,14 +905,30 @@ def _count_fingers(P, p_root, p_tip, h):
         wu, wv = float(np.ptp(Pl[:, 0])), float(np.ptp(Pl[:, 1]))
         ax = 0 if wu >= wv else 1
         w = max(wu, wv, 1e-6)
-        # пальцы разделяются по доминирующей поперечной оси кисти
-        cls = []
-        for g in _split_1d(Pl[:, ax], 0.10 * w):
-            if len(g) < max(3, int(0.08 * len(Pl))):
-                continue
-            cu = float(Pl[g, 0].mean())
-            cv = float(Pl[g, 1].mean())
-            cls.append({"c": (cu, cv), "n": len(g)})
+        # пальцы разделяются по доминирующей поперечной оси кисти.
+        # v2.11.0: порог АДАПТИВНЫЙ — 0.10*w у плотно упакованных
+        # пальцев больше реальных зазоров (зазор ~0.008-0.012 при
+        # w~0.10) и сечение не делилось вовсе (1 «палец»). Мельче —
+        # только при СТАБИЛЬНОСТИ: 0.06*w и 0.035*w дают ОДИНАКОВОЕ
+        # число кластеров (у сплошной варежки шум разрежённой выборки
+        # даёт разные фрагменты — нестабильно, остаётся 1 кластер)
+        nmin = max(3, int(0.05 * len(Pl)))
+        base = [g for g in _split_1d(Pl[:, ax], 0.10 * w)
+                if len(g) >= nmin]
+        cls = None
+        if 2 <= len(base) <= 6:
+            cls = base
+        else:
+            g1 = [g for g in _split_1d(Pl[:, ax], 0.06 * w)
+                  if len(g) >= nmin]
+            g2 = [g for g in _split_1d(Pl[:, ax], 0.035 * w)
+                  if len(g) >= nmin]
+            if 2 <= len(g1) <= 6 and len(g1) == len(g2):
+                cls = g1
+        if cls is None:
+            cls = base
+        cls = [{"c": (float(Pl[g, 0].mean()), float(Pl[g, 1].mean())),
+                "n": len(g)} for g in cls]
         # глобальное жадное паросочетание: ближайшие (кластер, трек)
         # соединяются первыми — пальцы не перепрыгивают между треками
         pairs = []
@@ -926,18 +947,42 @@ def _count_fingers(P, p_root, p_tip, h):
             used_t.add(tid)
             c = cls[ci]
             pt3 = p_root + d * (f * L) + u * c["c"][0] + v * c["c"][1]
-            tracks[tid].append((f, (c["c"][0], c["c"][1]), pt3))
+            tracks[tid].append((f, (c["c"][0], c["c"][1]), pt3,
+                                c["n"]))
         for ci, c in enumerate(cls):
             if ci in used_c:
                 continue
             pt3 = p_root + d * (f * L) + u * c["c"][0] + v * c["c"][1]
-            tracks[len(tracks)] = [(f, (c["c"][0], c["c"][1]), pt3)]
+            tracks[len(tracks)] = [(f, (c["c"][0], c["c"][1]), pt3,
+                                    c["n"])]
     fingers = []
     for tr in tracks.values():
-        if len(tr) >= 3:
-            pts = sorted(tr, key=lambda e: e[0])
-            fingers.append([pts[0][2], pts[len(pts) // 2][2],
-                            pts[-1][2]])
+        if len(tr) < 2:
+            continue
+        # мусорные треки: суммарный кластер слишком мал для пальца
+        nmin = max(30, int(0.012 * len(P)))
+        if sum(e[3] for e in tr) < nmin:
+            continue
+        pts = sorted(tr, key=lambda e: e[0])
+        f0, f1 = pts[0][0], pts[-1][0]
+        p0 = np.asarray(pts[0][2], dtype=float)
+        p1 = np.asarray(pts[-1][2], dtype=float)
+        # ладонь тоже даёт трек (её сечение есть в ближних срезах):
+        # настоящий палец ДОХОДИТ до кончика кисти и движется вдоль
+        # оси — ладонь кончается у костяшек (~0.4-0.6 L)
+        if float(np.linalg.norm(p1 - p_root)) < 0.75 * L or \
+                (f1 - f0) < 0.14:
+            continue
+        ax = p1 - p0
+        nal = float(np.linalg.norm(ax))
+        if nal < 1e-9:
+            continue
+        ax = ax / nal
+        # основание: экстраполяция к f=0.40 (костяшки), кончик: к 0.97
+        p_base = p0 + ax * ((0.40 - f0) * L)
+        p_tipf = p1 + ax * ((0.97 - f1) * L)
+        pmid = np.asarray(pts[len(pts) // 2][2], dtype=float)
+        fingers.append([tuple(p_base), tuple(pmid), tuple(p_tipf)])
     return len(fingers), fingers
 
 
@@ -1044,83 +1089,410 @@ def _chain_spec(out, names, anchors, coms, radii, dirs, base_parent=None):
         prev = nm
 
 
+def _hand_frame(P_hand, wr, tip, h):
+    """Рамка кисти из геометрии: ось пальцев d (запястье->кончик),
+    ось развода u (PCA поперечной компоненты), длина L, ширина w,
+    поперечный центр cu. None, если кисть вырождена."""
+    d = np.asarray(tip, dtype=float) - np.asarray(wr, dtype=float)
+    L = float(np.linalg.norm(d))
+    if L < 1e-6 or len(P_hand) < 30:
+        return None
+    d = d / L
+    rel = P_hand - np.asarray(wr, dtype=float)
+    tt = rel @ d
+    lat = rel - np.outer(tt, d)
+    if float(np.linalg.norm(lat)) < 1e-9:
+        return None
+    cov = lat.T @ lat
+    vals, vecs = np.linalg.eigh(cov)
+    u = vecs[:, int(np.argmax(vals))]
+    if float(np.linalg.norm(u)) < 1e-9:
+        return None
+    u = u / float(np.linalg.norm(u))
+    uu = lat @ u
+    w = float(np.percentile(uu, 92) - np.percentile(uu, 8))
+    cu = float(0.5 * (np.percentile(uu, 92) + np.percentile(uu, 8)))
+    Lq = float(np.percentile(tt, 95))
+    if Lq < 0.04 * h or w < 0.012 * h:
+        return None
+    return {"wr": tuple(map(float, wr)), "d": tuple(map(float, d)),
+            "u": tuple(map(float, u)), "cu": cu, "L": Lq, "w": w}
+
+
+def _pca_axis(P):
+    """Первая главная компонента облака точек (единичный вектор)."""
+    c = P.mean(axis=0)
+    rel = P - c
+    cov = rel.T @ rel
+    try:
+        vals, vecs = np.linalg.eigh(cov)
+        ax = vecs[:, int(np.argmax(vals))]
+    except Exception:
+        return None, c
+    n = float(np.linalg.norm(ax))
+    if n < 1e-9:
+        return None, c
+    return ax / n, c
+
+
+def _hand_from_blob(blob, h, xc=0.0, yc=0.0):
+    """Дистальная зона руки + оси-кандидаты кисти (v2.11.0).
+
+    Antropометрические запястье/локоть analyze_humanoid
+    откалиброваны на T-позу — у опущенной руки с согнутой кистью
+    (мех на скриншоте v2.10.1) они попадают ВНУТРЬ пальцев. Здесь
+    зона кисти берётся из ФАКТА блоба:
+
+      1) грубая ось руки e1 = PCA-1 блоба, направление — ОТ
+         крепления (attach всегда у проксимального конца) к
+         дистальному концу; без attach — конец, дальний от оси
+         тела (xc, yc);
+      2) чистая ось ПРЕДПЛЕЧЬЯ: PCA-1 проксимальных 60% блоба
+         (PCA всего блоба смешивает предплечье и согнутую кисть в
+         диагональ);
+      3) дистальная зона = последние 45% вдоль оси предплечья.
+
+    Точное запястье у согнутой кисти сечениями НЕ ищется: срез
+    перпендикулярно предплечью режет и ладонь, и разведённые
+    пальцы (ширина монотонно падает к кончикам, argmin уезжает на
+    кончики). Вместо этого вызывающий код (_human_finger_paths)
+    перебирает оси-кандидаты и выбирает ту, по которой
+    _count_fingers находит больше пальцев, — у согнутой кисти
+    побеждает хорда (root->tip), у прямой ось предплечья.
+
+    Возвращает dict(P, c, e1) (зона, центроид, ось предплечья) или
+    None (кисть не читается — остаётся анатомический веер)."""
+    P = blob.get("P")
+    P = np.asarray([] if P is None else P, dtype=float)
+    if len(P) < 200:
+        return None
+    e1, c = _pca_axis(P)
+    if e1 is None:
+        return None
+    attach = blob.get("attach")
+    attach = c if attach is None else np.asarray(attach, dtype=float)
+    # ориентация: дистальный конец — ДАЛЬНИЙ от крепления
+    ta = float((attach - c) @ e1)
+    if ta > 0.0:
+        e1 = -e1
+    t = (P - c) @ e1
+    lo, hi = float(t.min()), float(t.max())
+    if attach is c:
+        p_lo = c + e1 * lo
+        p_hi = c + e1 * hi
+        d_lo = float((p_lo[0] - xc) ** 2 + (p_lo[1] - yc) ** 2)
+        d_hi = float((p_hi[0] - xc) ** 2 + (p_hi[1] - yc) ** 2)
+        if d_hi < d_lo:
+            e1 = -e1
+            t = -t
+            lo, hi = -hi, -lo
+    if hi - lo < 0.10 * h:
+        return None
+    # чистая ось предплечья: PCA-1 проксимальных 60% (там кисти нет)
+    prox = P[t < lo + 0.60 * (hi - lo)]
+    if len(prox) >= 60:
+        e2, _ = _pca_axis(prox)
+        if e2 is not None and abs(float(e2 @ e1)) > 0.5:
+            if float(e2 @ e1) < 0.0:
+                e2 = -e2
+            e1 = e2
+    tmax = float(np.percentile((P - c) @ e1, 99))
+    span = tmax - float(np.percentile((P - c) @ e1, 1))
+    if span < 0.10 * h:
+        return None
+    # дистальные 45% руки (запястье+ладонь+пальцы)
+    t_all = (P - c) @ e1
+    sel = P[(t_all > tmax - 0.45 * span)]
+    if len(sel) < 80:
+        return None
+    return {"P": sel, "c": c, "e1": e1}
+
+
+def _band_centroid(P, c, a, q_lo, q_hi):
+    """Центроид точек зоны, чья проекция на ось a попала в полосу
+    [q_lo, q_hi] (доли размаха проекции). None для пустой полосы."""
+    s = (P - c) @ a
+    smin, smax = float(np.percentile(s, 3)), float(np.percentile(s, 97))
+    if smax - smin < 1e-9:
+        return None
+    lo_s = smin + q_lo * (smax - smin)
+    hi_s = smin + q_hi * (smax - smin)
+    band = P[(s >= lo_s) & (s <= hi_s)]
+    if len(band) < 10:
+        return None
+    return band.mean(axis=0)
+
+
+def _root_by_width(P, c, a, h):
+    """Запястье = центр centroid УЗКОГО сечения вдоль оси a (v2.11.0).
+
+    Сечения перпендикулярно ОСИ ПАЛЬЦЕВ: предплечье (0.08) ->
+    запястье (уже всегда) -> ладонь+пальцы (широко) -> кончики
+    (узко). Кончики исключаются диапазоном 12%..80% размаха; тонкое
+    окно (0.05 размаха) против размазывания по пальцам. Возврат
+    None — полосы пусты (вызывающий берёт полосу 6..20%)."""
+    s = (P - c) @ a
+    smin, smax = float(np.percentile(s, 3)), float(np.percentile(s, 97))
+    rng = smax - smin
+    if rng < 0.05 * h:
+        return None
+    win = max(0.006 * h, 0.05 * rng)
+    tmp = np.array([1.0, 0.0, 0.0])
+    if abs(float(tmp @ a)) > 0.9:
+        tmp = np.array([0.0, 1.0, 0.0])
+    u1 = tmp - a * float(tmp @ a)
+    nu = float(np.linalg.norm(u1))
+    u1 = u1 / nu if nu > 1e-9 else tmp
+    v1 = np.cross(a, u1)
+    nv = float(np.linalg.norm(v1))
+    v1 = v1 / nv if nv > 1e-9 else None
+    best_s, best_w = None, None
+    for s0 in np.linspace(smin + 0.12 * rng, smin + 0.80 * rng, 14):
+        band = P[np.abs(s - s0) < win]
+        if len(band) < 8:
+            continue
+        wdt = float(np.ptp(band @ u1))
+        if v1 is not None:
+            wdt = max(wdt, float(np.ptp(band @ v1)))
+        if best_w is None or wdt < best_w:
+            best_w, best_s = wdt, float(s0)
+    if best_s is None:
+        return None
+    band = P[np.abs(s - best_s) < win]
+    if len(band) < 8:
+        return None
+    return band.mean(axis=0)
+
+
+def _distill_axis(P, c, a, frac=0.55, rounds=2, keep=60):
+    """Дистилляция оси: PCA-1 дистальных frac% зоны вдоль текущей
+    оси, rounds раз. Предплечье+согнутая кисть: после пары раундов
+    остаётся кисть — ось сходится к направлению пальцев."""
+    cur = np.asarray(a, dtype=float)
+    n = float(np.linalg.norm(cur))
+    if n < 1e-9:
+        return None
+    cur = cur / n
+    sub = P
+    for _ in range(rounds):
+        s = (sub - c) @ cur
+        thr = float(np.percentile(s, 100.0 * (1.0 - frac)))
+        sub2 = sub[s >= thr]
+        if len(sub2) < keep:
+            break
+        sub = sub2
+        ax, _ = _pca_axis(sub)
+        if ax is None:
+            break
+        if float(ax @ cur) < 0.0:
+            ax = -ax
+        cur = ax
+    return cur
+
+
+def _hand_axis_candidates(P, c, e1):
+    """Оси-кандидаты кисти: ось предплечья, PCA зоны, ДИСТИЛЛИРОВАННЫЕ
+    оси (PCA дистальных 55%/40% — ось сходится к пальцам даже когда
+    зона наполовину предплечье), хорды и бисектор (для согнутой
+    кисти ось пальцев лежит МЕЖДУ осью предплечья и PCA зоны)."""
+    cands = [e1]
+    d1, _ = _pca_axis(P)
+    if d1 is not None:
+        if float(d1 @ e1) < 0.0:
+            d1 = -d1
+        cands.append(d1)
+    for seed in tuple(cands):
+        for frac in (0.55, 0.40):
+            da = _distill_axis(P, c, seed, frac=frac)
+            if da is not None and float(da @ e1) > 0.0:
+                cands.append(da)
+    for a in tuple(cands):
+        r = _band_centroid(P, c, a, 0.10, 0.25)
+        tp = _band_centroid(P, c, a, 0.88, 0.99)
+        if r is not None and tp is not None:
+            v = tp - r
+            n = float(np.linalg.norm(v))
+            if n > 1e-9:
+                cands.append(v / n)
+    bis = e1 + (cands[1] if len(cands) > 1 else e1)
+    nb = float(np.linalg.norm(bis))
+    if nb > 1e-9:
+        cands.append(bis / nb)
+    out = []
+    for a in cands:
+        na = float(np.linalg.norm(a))
+        if na < 1e-9:
+            continue
+        a = a / na
+        if float(a @ e1) < -0.2:
+            a = -a
+        if all(float(a @ b) < 0.97 for b in out):
+            out.append(a)
+    return out
+
+
 def _human_finger_paths(arms, lm, xc, h):
     """Пути пальцев human-плана ПО ГЕОМЕТРИИ (канонический кадр).
 
-    Для каждой руки: запястье из landmarks (wristL/wristR), кончик
-    кисти — самая далёкая от плеча точка руки; между ними
-    _count_fingers ищет реальные пальцы (кластеры в сечениях).
-    Возвращает dict("L"/"R" -> [(p_a, p_b, p_tip), ...]) — пути
-    ([основание, середина, кончик]); сторона без пальцев (варежка,
-    слипшиеся пальцы, <3 треков) даёт пустой список — тогда
-    add_finger_chains рисует стандартный веер."""
+    Зона кисти берётся из блоба руки (_hand_from_blob). Ось кисти
+    НЕ предполагается: перебираются оси-кандидаты (_hand_axis_candidates:
+    ось предплечья, PCA зоны, хорды, бисектор), для каждой
+    _count_fingers ищет пальцы, побеждает ось с МАКСИМУМОМ пальцев —
+    у согнутой кисти побеждает хорда root->tip, у прямой ось
+    предплечья. Возвращает dict("L"/"R" -> dict(paths=[(p_base,
+    p_mid, p_tip), ...], fan=dict|None)).
+
+    v2.11.0: landmarks больше НЕ корень геометрии кисти —
+    антропометрия запястья (wrist_y = кончик - 11% размаха,
+    калибровка на T-позу) у опущенной руки с согнутой кистью
+    попадала внутрь пальцев: срезы шли по ладони, детект видел
+    1 «палец» и включался веер, а веер рисовался от кости farm
+    «ладонью в пол» — кости пальцев не совпадали с пальцами.
+    Даже когда отдельные пальцы не читаются ни по одной оси
+    (варежка, перчатка), кисть даёт РАМКУ веера — ось d лучшей
+    оси-кандидата и ось развода u из ФАКТИЧЕСКОЙ геометрии:
+    пальцы-косточки смотрят туда же, куда пальцы меша, при любой
+    позе руки (T/A/вниз). Сторона без блоба руки вовсе даёт
+    fan=None — остаётся последний фолбэк (анатомический веер
+    вдоль farm)."""
     out = {}
     if lm is None:
-        return {"L": [], "R": []}
+        return {"L": {"paths": [], "fan": None},
+                "R": {"paths": [], "fan": None}}
     for sfx in ("L", "R"):
-        try:
-            wy = float(lm["wrist%s_y" % sfx])
-            wz = float(lm["wrist%s_z" % sfx])
-            ey = float(lm["elbow%s_y" % sfx])
-            ez = float(lm["elbow%s_z" % sfx])
-        except KeyError:
-            out[sfx] = []
-            continue
-        # x запястья/локтя этой руки (v2.10.1 — см. analyze_humanoid.
-        # arm_pts): ось руки по ФАКТИЧЕСКИМ точкам, а не по x-центру
-        # торса — иначе срезы кисти идут мимо пальцев
-        wx = float(lm.get("wrist%s_x" % sfx, xc))
-        exx = float(lm.get("elbow%s_x" % sfx, xc))
-        wr = np.array([wx, wy, wz])
         sgn = 1.0 if sfx == "L" else -1.0
         blob = None
         for w in arms:
             if float(w.get("side", 0.0)) * sgn > 0:
                 blob = w
                 break
-        if blob is None or len(blob.get("P", [])) < 30:
-            out[sfx] = []
+        hand = None
+        if blob is not None and len(blob.get("P", [])) >= 200:
+            try:
+                hand = _hand_from_blob(blob, h,
+                                       float(lm.get("xc", xc)),
+                                       float(lm.get("yc", 0.0)))
+            except Exception:
+                hand = None
+        if hand is None:
+            out[sfx] = {"paths": [], "fan": None}
             continue
-        P = np.asarray(blob["P"], dtype=float)
-        # ось РУКИ из локтя -> запястье: канонический yaw крутит тело
-        # вокруг МИРА, кисть уезжает вбок (y*sin(yaw)) — евклидов
-        # «самый далёкий» кончик показывал в бок кисти, срезы шли
-        # ПОПЕРЁК пальцев и детект давал 1 трек (v2.10.1)
-        d_arm = wr - np.array([exx, ey, ez])
-        n_arm = float(np.linalg.norm(d_arm))
-        if n_arm < 1e-6:
-            d_arm = np.array([0.0, sgn, 0.0])
-            n_arm = 1.0
-        d_arm = d_arm / n_arm
-        tt = (P - wr) @ d_arm
-        sel = P[tt > 0.02 * h]            # кисть = дальше запястья
-        if len(sel) < 30:
-            out[sfx] = []
+        Pz = hand["P"]
+        cz = hand["c"]
+        e1 = hand["e1"]
+        # скоринг осей: где больше пальцев, та и ось кисти.
+        # root — запястье по профилю ширины вдоль оси (у блоба,
+        # включающего всю руку, полоса 6..20% попадала в ПРЕДПЛЕЧЬЕ
+        # и L выходила локоть->кончик — срезы резали предплечье)
+        best = None
+        for a in _hand_axis_candidates(Pz, cz, e1):
+            root = _root_by_width(Pz, cz, a, h)
+            if root is None:
+                root = _band_centroid(Pz, cz, a, 0.06, 0.20)
+            tip = _band_centroid(Pz, cz, a, 0.88, 0.99)
+            if root is None or tip is None:
+                continue
+            if float(np.linalg.norm(tip - root)) < 0.04 * h:
+                continue
+            try:
+                n_f, fpaths = _count_fingers(Pz, root, tip, h)
+            except Exception:
+                continue
+            # при равных пальцах ось с КОРОЧЕ root->tip (меньше
+            # предплечья в базе): у варежки все оси дают 0 пальцев и
+            # побеждать должна дистиллированная ось кисти, а не
+            # ось предплечья (первый кандидат)
+            cand_len = float(np.linalg.norm(tip - root))
+            if best is None or n_f > best["n"] or \
+                    (n_f == best["n"] and cand_len < best["L"] - 1e-9):
+                best = {"n": n_f, "paths": fpaths, "root": root,
+                        "tip": tip, "a": a, "L": cand_len}
+        if best is None:
+            out[sfx] = {"paths": [], "fan": None}
             continue
-        # кончик кисти — среднее ТОП-15% дальних вдоль оси руки точек
-        # (одна случайная крайняя точка наклоняла ось кисти и срезы
-        # шли под углом к пальцам — v2.10.1)
-        dd = (sel - wr) @ d_arm
-        k = max(5, int(0.15 * len(sel)))
-        top = sel[np.argsort(-dd)[:k]]
-        tip = top.mean(axis=0)
-        n_f, fpaths = _count_fingers(P, wr, tip, h)
-        out[sfx] = [tuple(map(tuple, fp)) for fp in fpaths] \
-            if n_f >= 3 else []
+        wr = best["root"]
+        tip = best["tip"]
+        d = tip - wr
+        nd = float(np.linalg.norm(d))
+        if nd < 1e-6:
+            out[sfx] = {"paths": [], "fan": None}
+            continue
+        d = d / nd
+        # рамка веера из фактической кисти
+        rel = Pz - wr
+        tt = rel @ d
+        # длина кисти: перцентиль зоны, капнутый фактическим
+        # расстоянием до кончика — выбросы зоны за пальцами (редкая
+        # выборка кончиков) удлиняли L, и крайние пальцы веера
+        # выстреливали за кончик кисти
+        Lq = min(float(np.percentile(tt, 95)),
+                 float(np.linalg.norm(tip - wr)))
+        lat = rel - np.outer(tt, d)
+        nlat = float(np.linalg.norm(lat))
+        fan = None
+        if nlat > 1e-9 and Lq > 0.03 * h:
+            cov = lat.T @ lat
+            try:
+                vals, vecs = np.linalg.eigh(cov)
+                u = vecs[:, int(np.argmax(vals))]
+            except Exception:
+                u = None
+            if u is not None and float(np.linalg.norm(u)) > 1e-9:
+                u = u / float(np.linalg.norm(u))
+                uu = lat @ u
+                w = float(np.percentile(uu, 92) -
+                          np.percentile(uu, 8))
+                cu = float(0.5 * (np.percentile(uu, 92) +
+                                  np.percentile(uu, 8)))
+                if w > 0.012 * h:
+                    fan = {"wr": tuple(map(float, wr)),
+                           "d": tuple(map(float, d)),
+                           "u": tuple(map(float, u)),
+                           "cu": cu, "L": Lq, "w": w}
+        n_f = best["n"]
+        fpaths = best["paths"]
+        out[sfx] = {
+            "paths": [tuple(map(tuple, fp)) for fp in fpaths]
+            if n_f >= 3 else [],
+            "fan": fan,
+        }
     return out
 
 
 def _rotz_fingers(fingers, deg):
-    """Пути пальцев из канонического кадра в мировые координаты."""
+    """Пути пальцев и рамки веера из канонического кадра в мир.
+
+    Формат элементов: dict(paths=[...], fan=dict|None). Список путей
+    (старый формат — тесты/внешние данные) тоже принимается."""
     if not fingers:
         return fingers
+    a = math.radians(deg)
+    c, s = math.cos(a), math.sin(a)
+    R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+    def _rv(v):
+        return tuple((R @ np.asarray(v, dtype=float)).tolist())
+
     out = {}
-    for sfx, paths in fingers.items():
+    for sfx, ent in fingers.items():
+        if ent is None:
+            out[sfx] = {"paths": [], "fan": None}
+            continue
+        if isinstance(ent, (list, tuple)):
+            ent = {"paths": [tuple(tuple(p) for p in fp) for fp in ent],
+                   "fan": None}
         moved = []
-        for fp in paths:
+        for fp in ent.get("paths") or []:
             pts = _rotz(np.asarray(fp, dtype=float), deg)
             moved.append(tuple(tuple(p) for p in pts))
-        out[sfx] = moved
+        fan = ent.get("fan")
+        if fan:
+            fan2 = dict(fan)
+            fan2["wr"] = _rv(fan["wr"])
+            fan2["d"] = _rv(fan["d"])
+            fan2["u"] = _rv(fan["u"]) if fan.get("u") else None
+            fan = fan2
+        out[sfx] = {"paths": moved, "fan": fan}
     return out
 
 

@@ -1613,7 +1613,7 @@ pkg = importlib.util.module_from_spec(spec_imp)
 sys.modules["neuro_character_pipeline"] = pkg
 spec_imp.loader.exec_module(pkg)
 
-check("bl_info version 2.10.1", pkg.bl_info["version"] == (2, 10, 1),
+check("bl_info version 2.11.0", pkg.bl_info["version"] == (2, 11, 0),
       pkg.bl_info["version"])
 cls_names = [c.__name__ for c in pkg.classes]
 check("NCP_OT_build_skeleton зарегистрирован",
@@ -1643,6 +1643,7 @@ ann = getattr(pkg.NCP_Props, "__annotations__", {})
 for p in ("auto_rig", "body_plan", "add_fingers", "orient_auto",
           "mesh_rot_x", "mesh_rot_z", "debug_landmarks",
           "ctrl_ik", "ctrl_hide_deform", "ctrl_poles", "ctrl_fingers",
+          "ctrl_show", "ctrl_size",
           "rig_mode", "rec_auto", "rec_body", "rec_arms", "rec_legs",
           "rec_fingers", "rec_wings"):
     check("prop NCP_Props.%s" % p, p in ann)
@@ -1659,10 +1660,16 @@ check("Body plan enum: AUTO/HUMAN/QUADRUPED/WINGED_QUAD/BIRD/DRAGON",
                       "BIRD", "DRAGON"}, bp_ids)
 with open(os.path.join(ADDON, "blender_manifest.toml"), "rb") as f:
     man = tomllib.load(f)
-check("manifest version 2.10.1", man["version"] == "2.10.1",
+check("manifest version 2.11.0", man["version"] == "2.11.0",
       man["version"])
 with open(os.path.join(ADDON, "INSTALL_RU.txt"), encoding="utf-8") as f:
     install_txt = f.read()
+check("INSTALL_RU: секция 2.11.0 (пальцы/размер/управление)",
+      "ЧТО НОВОГО В 2.11.0" in install_txt and
+      "РАМКУ" in install_txt and "развода" in install_txt and
+      "СНАПЯТСЯ НА ПОВЕРХНОСТЬ" in install_txt and
+      "NCP_Helpers" in install_txt and
+      "Размер рычагов" in install_txt)
 check("INSTALL_RU: секция 2.10.0 (GPU-карточка)",
       "ЧТО НОВОГО В 2.10.0" in install_txt and  # секция остаётся в истории
       "ЧТО НОВОГО В 2.10.1" in install_txt and
@@ -1696,7 +1703,7 @@ _ncp_st = types.SimpleNamespace(
     rec_body=True, rec_arms=True, rec_legs=True,
     rec_fingers=True, rec_wings=False,
     ctrl_ik=True, ctrl_poles=True, ctrl_fingers=True,
-    ctrl_hide_deform=False)
+    ctrl_hide_deform=False, ctrl_show=True, ctrl_size=1.0)
 _ncp_ctx = types.SimpleNamespace(
     scene=types.SimpleNamespace(ncp=_ncp_st), area=None,
     preferences=types.SimpleNamespace(
@@ -1807,9 +1814,26 @@ finally:
 # add_finger_chains кладёт кости НА пальцы меша
 res_f = nc.analyze(build_human_t(), base_spec=spec18, add_fingers=True)
 fps = res_f.get("fingers") or {}
+
+
+def _n_ent_paths(v):
+    if isinstance(v, dict):
+        return len(v.get("paths") or [])
+    if isinstance(v, (list, tuple)):
+        return len(v)
+    return 0
+
+
 check("v2.10.1: analyze вернул пути пальцев (>=3 на сторону)",
-      len(fps.get("L", [])) >= 3 and len(fps.get("R", [])) >= 3,
-      {k: len(v) for k, v in fps.items()})
+      _n_ent_paths(fps.get("L")) >= 3 and _n_ent_paths(fps.get("R")) >= 3,
+      {k: _n_ent_paths(v) for k, v in fps.items()})
+# v2.11.0: рамка веера присутствует для обеих кистей (даже когда
+# пальцы читаются — веер нужен как фолбэк варежки)
+check("v2.11.0: рамка кисти (fan) есть у обеих сторон",
+      all(isinstance(fps.get(s), dict) and (fps[s].get("fan") or {}).get("d")
+          and (fps[s].get("fan") or {}).get("u") for s in ("L", "R")),
+      {k: sorted((v or {}).keys()) if isinstance(v, dict) else type(v)
+       for k, v in fps.items()})
 
 arm_f = neuro_rig.build_armature(res_f["spec"], name="NeuroCharF")
 n_fgeo = neuro_rig.add_finger_chains(arm_f, scale=res_f["h"] / 1.70,
@@ -1865,6 +1889,137 @@ ik_pairs = [(pb.name, c.subtarget) for pb in arm_y.pose.bones
             for c in pb.constraints if c.type == "IK"]
 check("v2.10.1: IK ноги на хелпере NCPK_*",
       any(n.startswith("NCPK_") for n, _s in ik_pairs), ik_pairs)
+
+# ======================= v2.11.0: руки ВНИЗ, кисть СОГНУТА (сценарий
+# пользователя-меха: скриншот v2.10.1 — кости пальцев поперёк пальцев)
+def build_hanging():
+    """Человек: руки вниз вдоль тела, кисти согнуты вперёд ~60°.
+    Лицо +X, бока ±Y, низ z=0. Возвращает (pts, ось_пальцев)."""
+    d_arm = np.array([0.06, 0.985, -0.17])
+    d_arm /= np.linalg.norm(d_arm)
+    d_f = np.array([0.85, 0.0, -0.53])
+    d_f /= np.linalg.norm(d_f)
+    P = [cap((0.0, 0.10, 1.00), (0.02, 0.10, 0.06), 0.06, 3000, 200),
+         cap((0.0, -0.10, 1.00), (0.02, -0.10, 0.06), 0.06, 3000, 201),
+         cap((0.02, 0.10, 0.028), (0.16, 0.10, 0.02), 0.025, 500, 202),
+         cap((0.02, -0.10, 0.028), (0.16, -0.10, 0.02), 0.025, 500, 203),
+         cap((0.0, 0.0, 0.95), (0.0, 0.0, 1.48), 0.14, 7000, 204),
+         cap((0.0, 0.0, 1.58), (0.0, 0.0, 1.70), 0.095, 1200, 205)]
+    for s in (+1, -1):
+        ds = d_arm.copy()
+        ds[1] = s * d_arm[1]
+        ds[0] = 0.06 * s
+        ds /= np.linalg.norm(ds)
+        sh = np.array([0.0, s * 0.20, 1.44])
+        el = sh + ds * 0.30
+        wr = sh + ds * 0.52
+        P.append(cap(sh, el, 0.045, 1200, 210 + s))
+        P.append(cap(el, wr, 0.040, 1200, 220 + s))
+        palm0 = wr + d_f * 0.015
+        palm1 = wr + d_f * 0.075
+        P.append(cap(palm0, palm1, 0.030, 500, 230))
+        for i, off in enumerate((-0.045, -0.0225, 0.0, 0.0225, 0.045)):
+            b0 = palm1 + np.array([0.0, s * off, 0.0])
+            t0 = b0 + d_f * 0.115
+            P.append(cap(b0, t0, 0.0072, 260,
+                         240 + i + (0 if s > 0 else 10)))
+    return np.vstack(P), d_f
+
+
+pts_h, d_f_hand = build_hanging()
+res_h = nc.analyze(pts_h, base_spec=spec18)
+check("v2.11.0: руки вниз -> план human", res_h["plan"] == "human",
+      res_h["plan"])
+fps_h = res_h.get("fingers") or {}
+
+
+def _n_hp(v):
+    if isinstance(v, dict):
+        return len(v.get("paths") or [])
+    if isinstance(v, (list, tuple)):
+        return len(v)
+    return 0
+
+
+check("v2.11.0: пальцы найдены ПО ГЕОМЕТРИИ у обеих кистей (>=4)",
+      _n_hp(fps_h.get("L")) >= 4 and _n_hp(fps_h.get("R")) >= 4,
+      {k: _n_hp(v) for k, v in fps_h.items()})
+fanL = (fps_h.get("L") or {}).get("fan") or {}
+if fanL:
+    dot_ax = float(np.dot(np.array(fanL["d"], dtype=float), d_f_hand))
+    check("v2.11.0: ось веера кисти = ось пальцев меша (dot > 0.85)",
+          dot_ax > 0.85, round(dot_ax, 3))
+arm_h = neuro_rig.build_armature(res_h["spec"], name="NeuroCharHang")
+n_hf = neuro_rig.add_finger_chains(arm_h, scale=res_h["h"] / 1.70,
+                                   finger_paths=fps_h)
+check("v2.11.0: кости пальцев созданы (>=14)", n_hf >= 14, n_hf)
+worst_dot_h = 1.0
+n_dot_h = 0
+for _s2 in ("L", "R"):
+    for _fn2 in ("thumb", "index", "middle", "ring", "pinky"):
+        for _sg2 in (1, 2):
+            _eb2 = arm_h.data.edit_bones.get("fng_%s_%d_%s"
+                                             % (_fn2, _sg2, _s2))
+            if _eb2 is None:
+                continue
+            _v2 = _eb2.vector
+            if _v2.length < 1e-9:
+                continue
+            worst_dot_h = min(worst_dot_h,
+                              _v2.normalized().dot(FakeVector(*d_f_hand)))
+            n_dot_h += 1
+check("v2.11.0: кости пальцев ВДОЛЬ пальцев меша (min dot %.2f > 0.8)"
+      % worst_dot_h, n_dot_h >= 8 and worst_dot_h > 0.8,
+      (n_dot_h, round(worst_dot_h, 3)))
+# кости пальцев около кисти меша (центр пальцев L: y~0.66-0.76,
+# z~1.25-1.35 в мире)
+_eb0 = arm_h.data.edit_bones.get("fng_middle_1_L")
+check("v2.11.0: пальцы у кисти, не у корпуса/нуля",
+      _eb0 is not None and 0.5 < _eb0.head.y < 0.9 and
+      1.1 < _eb0.head.z < 1.5, _eb0.head if _eb0 else None)
+
+# ---- v2.11.0: размеры рычагов ЛОКАЛЬНЫЕ + слайдер + видимость
+sizes_raw = arm.get("ncp_ctrl_sizes")
+check("v2.11.0: ncp_ctrl_sizes записан на арматуру", bool(sizes_raw),
+      sizes_raw)
+import json as _json  # noqa: E402
+sizes_d = _json.loads(sizes_raw) if sizes_raw else {}
+sz_bad = []
+for _nm, _base in sizes_d.items():
+    _pb2 = _pb(arm, _nm)
+    if _pb2 is None:
+        continue
+    _sc = getattr(_pb2, "custom_shape_scale_xyz", None)
+    if _sc is None:
+        continue
+    _lim = (0.014 * 1.75 if _nm.startswith("CTRL_Finger_")
+            else 0.075 * 1.75)
+    if _sc[0] > _lim:
+        sz_bad.append((_nm, round(_sc[0], 4)))
+check("v2.11.0: кольца/диски малые (<=0.075h, диски <=0.014h)",
+      not sz_bad, sz_bad[:5])
+check("v2.11.0: Root-кольцо <= 0.06h (было 0.17h)",
+      sizes_d.get("CTRL_Root", 1.0) <= 0.06 * 1.75,
+      sizes_d.get("CTRL_Root"))
+n_up = nctl.apply_size_mult(arm, 2.0)
+check("v2.11.0: apply_size_mult обновил все формы", n_up == len(sizes_d),
+      (n_up, len(sizes_d)))
+n_hid = nctl.set_handles_visible(arm, False)
+hid_cnt = sum(1 for b in arm.data.bones
+              if (b.name.startswith(("CTRL_", "NCPK_")) and b.hide))
+def_cnt = sum(1 for b in arm.data.bones
+              if not b.name.startswith(("CTRL_", "NCPK_")) and b.hide)
+check("v2.11.0: скрыть все рычаги одной галкой", n_hid == hid_cnt
+      and n_hid > 0 and def_cnt == 0, (n_hid, hid_cnt, def_cnt))
+nctl.set_handles_visible(arm, True)
+back_cnt = sum(1 for b in arm.data.bones
+               if b.name.startswith("CTRL_") and b.hide)
+check("v2.11.0: показать рычаги обратно", back_cnt == 0, back_cnt)
+check("v2.11.0: NCP_Shape_* скрыты (hide_viewport/hide_render)",
+      all(getattr(bpy.data.objects.get("NCP_Shape_%s" % k), a, True)
+          for k, a in (("Disc", "hide_render"), ("Ring", "hide_render"),
+                       ("Disc", "hide_viewport"),
+                       ("Ring", "hide_viewport"))))
 
 print()
 

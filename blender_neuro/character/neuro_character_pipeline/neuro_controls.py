@@ -28,10 +28,18 @@ neuro_character_pipeline.neuro_controls — слой рычагов (control han
   4. пальцевые рычаги попадают в отдельную коллекцию костей
      NCP_Controls_Fine — их можно скрыть отдельно от крупных рычагов.
 
-Формы рычагов (2.9.0): пальцы — маленькие оранжевые ДИСКИ
+Формы рычагов (2.11.0): пальцы — маленькие оранжевые ДИСКИ
 (NCP_Shape_Disc), остальные суставы — КОЛЬЦА с полым ободом
-(NCP_Shape_Ring: сустав виден сквозь кольцо), Root — большое кольцо,
-Body — диск. set_mode() — переключатель «T-поза / анимация»
+(NCP_Shape_Ring: сустав виден сквозь кольцо), Root — кольцо,
+Body — диск. Размеры ЛОКАЛЬНЫЕ: кольцо сустава — ~0.5 длины
+концевой кости (ступня — кольцо размером со ступню, кисть — с
+кисть), диск пальца — ~0.55 длины пальца, а не 0.09–0.17 роста
+(v2.10.1: у персонажа 1.7 м кольца были 15–30 см в диаметре и
+закрывали вьюпорт). Базы хранятся на арматуре (ncp_ctrl_sizes,
+JSON): apply_size_mult() применяет множитель слайдера «Размер
+рычагов» живьём; set_handles_visible() показывает/прячет ВСЕ
+рычаги одной галкой (Bone.hide на CTRL_*/NCPK_*).
+set_mode() — переключатель «T-поза / анимация»
 (TPOSE: IK выкл + поза рычагов сброшена в rest; ANIM: IK вкл).
 Запись по слоям: record_frame() ставит кейфрейм текущей позы рычагов
 включённых слоёв (body/arms/legs/fingers/wings), record_set_enabled()
@@ -64,6 +72,7 @@ Neuro Motion) пишет pb.matrix абсолютно и influence гасит �
 neuro_creature.analyze), поэтому слой работает для любого плана —
 человек, четвероногий, птица, дракон, двуногий с хвостом.
 """
+import json
 import math
 import os
 import re
@@ -363,8 +372,50 @@ SHAPES = {"disc": ("NCP_Shape_Disc", _SHAPE_DISC),
           "box": ("NCP_Shape_Box", _SHAPE_BOX)}
 
 
+def _helpers_collection():
+    """Коллекция NCP_Helpers для объектов-форм (вне вида).
+
+    Стабы без bpy.data.collections молча пропускают (тогда формы
+    остаются в scene collection, как в v2.10.1 — косметике не мешает)."""
+    try:
+        coll = bpy.data.collections.get("NCP_Helpers")
+        if coll is None:
+            coll = bpy.data.collections.new("NCP_Helpers")
+        scene = bpy.context.scene
+        linked = any(c.name == coll.name
+                     for c in scene.collection.children)
+        if not linked:
+            scene.collection.children.link(coll)
+        return coll
+    except Exception:
+        return None
+
+
+def _exclude_from_view(coll):
+    """Исключить коллекцию из вью-слоя (объекты не рисуются и не
+    мешают в аутлайнере). Custom shapes читают МЕШ-данные напрямую,
+    видимость объекта-формы на них не влияет."""
+    try:
+        def _walk(lc):
+            if lc.collection.name == coll.name:
+                lc.exclude = True
+                return True
+            for ch in lc.children:
+                if _walk(ch):
+                    return True
+            return False
+        _walk(bpy.context.view_layer.layer_collection)
+    except Exception:
+        pass
+
+
 def _get_shape(kind):
-    """Объект-форма для custom_shape (скрытый; None = косметика не удалась)."""
+    """Объект-форма для custom_shape (скрытый; None = косметика не удалась).
+
+    v2.11.0: формы живут в коллекции NCP_Helpers, исключённой из
+    вью-слоя (глаз + hide_viewport + hide_render + hide_select):
+    в аутлайнере и вьюпорте их больше не видно, случайно выбрать/
+    показать их нельзя; на отображение custom shapes это не влияет."""
     name, geo = SHAPES[kind]
     try:
         me = bpy.data.meshes.get(name)
@@ -374,16 +425,32 @@ def _get_shape(kind):
         ob = bpy.data.objects.get(name)
         if ob is None:
             ob = bpy.data.objects.new(name, me)
-            ob.hide_render = True
-            ob.hide_select = True
-            try:
-                ob.hide_viewport = True
-            except AttributeError:
-                pass
             try:
                 bpy.context.scene.collection.objects.link(ob)
             except Exception:
                 pass
+        ob.hide_render = True
+        ob.hide_select = True
+        try:
+            ob.hide_viewport = True
+        except AttributeError:
+            pass
+        try:
+            ob.hide_set(True)
+        except Exception:
+            pass
+        coll = _helpers_collection()
+        if coll is not None and ob.name not in coll.objects:
+            for c in list(ob.users_collection):
+                try:
+                    c.objects.unlink(ob)
+                except Exception:
+                    pass
+            try:
+                coll.objects.link(ob)
+            except Exception:
+                pass
+            _exclude_from_view(coll)
         return ob
     except Exception:
         return None
@@ -399,12 +466,26 @@ def _set_shape(pb, kind, size):
         return
     try:
         pb.use_custom_shape_bone_size = False
-        pb.custom_shape_scale_uniform = size
     except Exception:
+        pass
+    # v2.11.0: на Blender 4+/5.x НЕТ custom_shape_scale_uniform
+    # (удалён в 4.0, остался custom_shape_scale_xyz) — раньше оба
+    # варианта падали в except, масштаб оставался 1.0 и кольца
+    # рисовались радиусом 1 МЕТР (форма-меш R=1) — «кольца очень
+    # большие» на скриншоте v2.10.1
+    s = float(size)
+    try:
+        pb.custom_shape_scale_xyz = (s, s, s)      # Blender 4.x/5.x
+    except AttributeError:
         try:
-            pb.custom_shape_scale = size
+            pb.custom_shape_scale_uniform = s       # Blender 3.x
         except Exception:
-            pass
+            try:
+                pb.custom_shape_scale = (s, s, s)   # очень старые
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _set_color(pb, rgba):
@@ -676,7 +757,12 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
             hl = max(0.06 * h, min(tip.length * 0.5, 0.12 * h))
             new_ctrl(name, anchor - d * hl, anchor, parent=par)
             ch["handle"] = name
-            kind_sizes[name] = max(0.09 * h, min(tip.length, 0.25 * h))
+            # v2.11.0: кольцо сустава — по ТОЛЩИНЕ СВОЕЙ конечности
+            # (0.5 длины концевой кости, рамка 0.02h..0.07h), а не
+            # 0.09–0.25 роста (v2.10.1: кольца 15–30 см закрывали
+            # вьюпорт у персонажа 1.7 м)
+            kind_sizes[name] = max(0.02 * h,
+                                   min(tip.length * 0.5, 0.07 * h))
             if ch["kind"] == "leg":
                 hd = _horiz_dir(d)
                 if hd is not None:
@@ -780,8 +866,10 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
                 ch["pole_angle"] = _pole_angle_for(eb1, rootpos,
                                                    ch["anchor"], kdir)
                 poles_made.append(pname)
-                kind_sizes[pname] = max(0.045 * h,
-                                        min(0.10 * h, 0.35 * pl))
+                # v2.11.0: полюс — компактное кольцо у сустава
+                kind_sizes[pname] = max(0.015 * h,
+                                        min(0.06 * chain_len,
+                                            0.035 * h))
 
         # -- рычаги пальцев: по одному на каждый пальцевую цепочку
         for fc in fchains:
@@ -799,8 +887,11 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
                      parent=fc["parent"])
             fc["handle"] = fname
             fingers_made.append(fname)
-            kind_sizes[fname] = max(0.025 * h,
-                                    min(tipf.length * 0.8, 0.06 * h))
+            # v2.11.0: диск пальца — по длине ПАЛЬЦА (0.55 сегмента,
+            # рамка 0.006h..0.013h), а не 0.025–0.06 роста (v2.10.1:
+            # диск 4–10 см на пальце 1 см толщиной)
+            kind_sizes[fname] = max(0.006 * h,
+                                    min(tipf.length * 0.55, 0.013 * h))
     finally:
         _object_mode()
 
@@ -892,14 +983,21 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
 
     # -- косметика: формы, цвета, коллекции, видимость
     # пальцы — оранжевые ДИСКИ; остальные суставы — КОЛЬЦА (полый обод,
-    # сустав виден сквозь него); Root — большое кольцо, Body — диск
+    # сустав виден сквозь него); Root — кольцо, Body — диск.
+    # v2.11.0: Root/Body тоже компактные (0.055h/0.045h — ранее
+    # 0.17h/0.12h: кольцо Root было 58 см диаметром у роста 1.7 м);
+    # базы размеров сохраняются на арматуре для слайдера «Размер
+    # рычагов» (apply_size_mult)
     pose = arm_obj.pose.bones
+    sizes_all = dict(kind_sizes)
+    sizes_all["CTRL_Root"] = 0.055 * h
+    sizes_all["CTRL_Body"] = 0.045 * h
     for name, kind in (("CTRL_Root", "root"), ("CTRL_Body", "body")):
         try:
             pb = pose.get(name)
             if pb is not None:
                 _set_shape(pb, "ring" if kind == "root" else "disc",
-                           0.17 * h if kind == "root" else 0.12 * h)
+                           sizes_all[name])
                 _set_color(pb, _KIND_COLOR[kind])
                 _assign_coll(arm_obj.data, name, "NCP_Controls")
         except Exception:
@@ -910,7 +1008,7 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
             if pb is None:
                 continue
             _set_shape(pb, "disc" if name.startswith("CTRL_Finger_")
-                       else "ring", kind_sizes.get(name, 0.09 * h))
+                       else "ring", sizes_all.get(name, 0.03 * h))
             _set_color(pb, _KIND_COLOR[_bone_kind(name)])
         except Exception:
             pass
@@ -920,6 +1018,11 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
     for pb in pose:
         if not pb.name.startswith(PFX):
             _assign_coll(arm_obj.data, pb.name, "NCP_Deform")
+    try:
+        arm_obj["ncp_ctrl_sizes"] = json.dumps(
+            {k: round(float(v), 5) for k, v in sizes_all.items()})
+    except Exception:
+        pass
     try:
         arm_obj.show_in_front = True
     except Exception:
@@ -963,6 +1066,77 @@ def remove_constraints(arm_obj):
     return n
 
 
+def apply_size_mult(arm_obj, mult):
+    """Множитель размера рычагов — слайдер «Размер рычагов» (v2.11.0).
+
+    Базовые радиусы форм (в метрах) сохраняются на арматуре при
+    сборке (ncp_ctrl_sizes, JSON: имя кости -> радиус); здесь scale
+    = base * mult ставится всем костям из базы живьём — пересборка
+    не нужна. Возвращает число обновлённых костей (0 — нет базы/
+    нет рычагов).
+
+    v2.11.0: на Blender 4+/5.x свойства custom_shape_scale_uniform
+    нет (удалён в 4.0) — пишем custom_shape_scale_xyz."""
+    if arm_obj is None:
+        return 0
+    try:
+        raw = arm_obj.get("ncp_ctrl_sizes")
+        sizes = json.loads(raw) if raw else {}
+    except Exception:
+        sizes = {}
+    if not sizes:
+        return 0
+    n = 0
+    try:
+        pose = arm_obj.pose.bones
+    except AttributeError:
+        return 0
+    for name, base in sizes.items():
+        pb = pose.get(name)
+        if pb is None:
+            continue
+        s = float(base) * float(mult)
+        try:
+            pb.custom_shape_scale_xyz = (s, s, s)
+            n += 1
+            continue
+        except AttributeError:
+            pass
+        except Exception:
+            continue
+        try:
+            pb.custom_shape_scale_uniform = s
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
+def set_handles_visible(arm_obj, visible):
+    """Показать/скрыть ВСЕ рычаги одной галкой (v2.11.0).
+
+    Скрываются CTRL_* (рычаги, включая пальцевые диски) и NCPK_*
+    (IK-хелперы) через Bone.hide — остовные кости не трогаются,
+    работает в Object/Pose mode. Возвращает число затронутых
+    костей (0 — нет рычагов)."""
+    if arm_obj is None:
+        return 0
+    n = 0
+    try:
+        bones = arm_obj.data.bones
+    except AttributeError:
+        return 0
+    for b in bones:
+        nm = getattr(b, "name", "")
+        if nm.startswith(PFX) or nm.startswith(HLP_PFX):
+            try:
+                b.hide = not bool(visible)
+                n += 1
+            except Exception:
+                pass
+    return n
+
+
 def remove_controls(arm_obj):
     """Удалить слой рычагов (кости CTRL_*/NCPK_* и констрейнты NCP_*)."""
     n = remove_constraints(arm_obj)
@@ -985,11 +1159,12 @@ def remove_controls(arm_obj):
     except Exception:
         pass
     _object_mode()
-    try:
-        if arm_obj.get("ncp_ctrl") is not None:
-            del arm_obj["ncp_ctrl"]
-    except Exception:
-        pass
+    for key in ("ncp_ctrl", "ncp_ctrl_sizes"):
+        try:
+            if arm_obj.get(key) is not None:
+                del arm_obj[key]
+        except Exception:
+            pass
     return n
 
 

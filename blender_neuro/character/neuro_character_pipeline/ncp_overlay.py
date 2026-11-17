@@ -793,17 +793,28 @@ def _build(context, region):
                  "выключает автозапись сам")
             rule()
             label("Рычаги", gap=17.0)
+            chip_row([("Показать", st.ctrl_show, "handles_show",
+                       ("prop", (st, "ctrl_show"))),
+                      ("Выделить", False, "handles",
+                       ("op", "ncp.select_handles")),
+                      ("Пересобрать", False, "handles",
+                       ("op", "ncp.rebuild_handles"))], h=28.0)
             switch("IK-рычаги", st, "ctrl_ik", tip="ik")
             switch("Полюсы коленей/локтей", st, "ctrl_poles", tip="poles")
             switch("Рычаги пальцев", st, "ctrl_fingers", tip="fhands")
             switch("Скрыть кости скелета", st, "ctrl_hide_deform",
                    tip="hide")
-            chip_row([("Выделить", False, "handles",
-                       ("op", "ncp.select_handles")),
-                      ("Пересобрать", False, "handles",
-                       ("op", "ncp.rebuild_handles"))], h=28.0)
-            hint("Root — весь персонаж; кольца — суставы; оранжевые "
-                 "диски — пальцы. Рычаги не деформируют меш")
+            label("Размер рычагов", gap=13.0)
+            chip_row([("Мелко", abs(st.ctrl_size - 0.6) < 0.01,
+                       "size", ("enum", (st, "ctrl_size", 0.6))),
+                      ("Норма", abs(st.ctrl_size - 1.0) < 0.01,
+                       "size", ("enum", (st, "ctrl_size", 1.0))),
+                      ("Крупно", abs(st.ctrl_size - 1.6) < 0.01,
+                       "size", ("enum", (st, "ctrl_size", 1.6)))], h=28.0)
+            hint("Кольца — суставы (нога — кольцо со ступню), оранжевые "
+                 "диски — пальцы, Root — весь персонаж. Тяните их в "
+                 "режиме Анимация; на скелет они не влияют. «Показать» "
+                 "прячет/возвращает все рычаги разом")
 
     # ---- сказать в ответ -----------------------------------------------------
     note = _state.get("note")
@@ -815,7 +826,7 @@ def _build(context, region):
         y[0] -= 3.0
 
     rule()
-    ver = "2.10.1"
+    ver = "2.11.0"
     try:
         if pkg is not None and getattr(pkg, "bl_info", None):
             ver = ".".join(str(v) for v in pkg.bl_info["version"])

@@ -14,7 +14,7 @@ Neuro Character Pipeline — мастер-аддон, связывающий:
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 10, 1),
+    "version": (2, 11, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP (GPU-карточка) | "
                 "Properties > Scene",
@@ -294,6 +294,8 @@ def _add_controls(context, arm):
     """Слой рычагов поверх готового рига. Неудача не роняет скелет.
     Возвращает короткую заметку для статус-карточки (или "").
 
+    v2.11.0: после сборки применяются размер (множитель st.ctrl_size)
+    и видимость (st.ctrl_show) — пересборка не сбрасывает их.
     v2.10.1: заметка об ошибке больше не теряется — раньше
     «рычаги не построились (…)» писались в st.status ДО того, как
     вызывающий код перезаписывал статус отчётом сборки, и
@@ -304,6 +306,14 @@ def _add_controls(context, arm):
             arm, ik_on=bool(st.ctrl_ik),
             hide_deform=bool(st.ctrl_hide_deform),
             fingers=bool(st.ctrl_fingers), poles=bool(st.ctrl_poles))
+        try:
+            neuro_controls.apply_size_mult(arm, float(st.ctrl_size))
+        except Exception:
+            pass
+        try:
+            neuro_controls.set_handles_visible(arm, bool(st.ctrl_show))
+        except Exception:
+            pass
         try:
             # слои записи и режим — на арматуру (v2.9.0); T-Поза в панели
             # применяется сразу (IK выкл + rest), Анимация уважает галку IK
@@ -353,7 +363,7 @@ def _build_rig(context, mesh):
         rot_x, rot_z = 0.0, 0.0   # place_mesh уже повернул и поставил меш
     arm = neuro_rig.build_armature(spec, name="NeuroCharacter")
     if st.add_fingers:
-        neuro_rig.add_finger_chains(arm)
+        neuro_rig.add_finger_chains(arm, mesh_obj=mesh)
     neuro_rig.fit_mesh_to_skeleton(
         mesh, spec, rot_x_deg=rot_x, rot_z_deg=rot_z,
         do_apply=st.apply_transforms)
@@ -406,13 +416,26 @@ def _build_rig_auto(context, mesh, spec, rot_x, rot_z):
     if res["plan"] == "human":
         if st.add_fingers:
             fpaths = res.get("fingers") or {}
-            n_geo = sum(len(v) for v in fpaths.values()
-                        if isinstance(v, (list, tuple)))
+
+            def _n_paths(v):
+                if isinstance(v, dict):
+                    return len(v.get("paths") or [])
+                if isinstance(v, (list, tuple)):
+                    return len(v)
+                return 0
+
+            n_geo = sum(_n_paths(v) for v in fpaths.values())
             n_f = neuro_rig.add_finger_chains(
-                arm, scale=res["h"] / 1.70, finger_paths=fpaths)
+                arm, scale=res["h"] / 1.70, finger_paths=fpaths,
+                mesh_obj=mesh)
             if n_geo >= 6:
                 fingers_geo_note = ("; пальцы по геометрии кисти: %d "
                                     "(веер не понадобился)" % n_f)
+            elif n_f > 0 and any(
+                    (v or {}).get("fan") if isinstance(v, dict) else False
+                    for v in fpaths.values()):
+                fingers_geo_note = ("; пальцы по рамке кисти из "
+                                    "геометрии (пальцы слиты)")
     else:
         arm["ncp_plan"] = res["plan"]
         if res["notes"]:
@@ -631,6 +654,7 @@ def _rig_mode_update(self, context):
         rep = neuro_controls.set_mode(arm, self.rig_mode)
         st = context.scene.ncp
         st.status = rep
+        st.state = "DONE"      # успех переключения гасит «Ошибку»
     except Exception:
         pass
 
@@ -664,6 +688,30 @@ def _rec_layers_update(self, context):
     try:
         neuro_controls.rec_set_state(
             arm, _rec_state_from_props(context.scene.ncp))
+    except Exception:
+        pass
+
+
+def _ctrl_size_update(self, context):
+    """Множитель размера рычагов: пересчитать custom_shape_scale
+    всех CTRL-костей (база хранится на арматуре в ncp_ctrl_sizes)."""
+    arm = bpy.data.objects.get("NeuroCharacter")
+    if arm is None or arm.type != "ARMATURE":
+        return
+    try:
+        neuro_controls.apply_size_mult(arm, float(self.ctrl_size))
+    except Exception:
+        pass
+
+
+def _ctrl_show_update(self, context):
+    """Показать/скрыть все рычаги (CTRL_*/NCPK_*): одна галка —
+    персонаж чистый или весь слой рычагов виден."""
+    arm = bpy.data.objects.get("NeuroCharacter")
+    if arm is None or arm.type != "ARMATURE":
+        return
+    try:
+        neuro_controls.set_handles_visible(arm, bool(self.ctrl_show))
     except Exception:
         pass
 
@@ -829,6 +877,20 @@ class NCP_Props(bpy.types.PropertyGroup):
         description="Спрятать остовные кости скелета — в вьюпорте "
                     "остаются только крупные рычаги; они не деформируют "
                     "меш и анимации не мешают")
+    ctrl_show: BoolProperty(
+        name="Show handles", default=True,
+        update=_ctrl_show_update,
+        description="Показать/скрыть ВСЕ рычаги разом (Root, IK-рычаги, "
+                    "полюсы, рычаги пальцев). Выключите, чтобы увидеть "
+                    "персонажа чистым; включите обратно, чтобы двигать")
+    ctrl_size: FloatProperty(
+        name="Handle size", default=1.0, min=0.3, max=3.0,
+        soft_min=0.4, soft_max=2.5, step=10,
+        update=_ctrl_size_update,
+        description="Размер рычагов: множитель к базовым размерам "
+                    "(кольца суставов, диски пальцев). База подбирается "
+                    "по толщине своей конечности, а не по росту "
+                    "персонажа — если кольца всё же велики, уменьшите")
     # --- режим и запись (v2.9.0)
     rig_mode: EnumProperty(
         name="Mode",
@@ -1175,6 +1237,13 @@ class NCP_OT_build_skeleton(bpy.types.Operator):
             _fail(context, "Скелет: %s: %s" % (type(e).__name__, e))
             self.report({"ERROR"}, "%s: %s" % (type(e).__name__, e))
             return {"CANCELLED"}
+        # v2.11.0: успешная сборка сбрасывает красный статус: раньше
+        # st.state оставался ERROR от прежнего шага, и карточка
+        # подписывала готовый риг «Ошибка» (скриншот v2.10.1)
+        st = _st(context)
+        st.state = "DONE"
+        if st.status:
+            _card_say(st.status)
         self.report({"INFO"}, "Скелет NeuroCharacter готов, весы назначены")
         return {"FINISHED"}
 
@@ -1199,6 +1268,7 @@ class NCP_OT_select_handles(bpy.types.Operator):
             self.report({"ERROR"}, "На скелете нет рычагов — "
                                    "нажмите Rebuild Handles")
             return {"CANCELLED"}
+        _st(context).state = "DONE"
         self.report({"INFO"}, "Рычаги выделены: %d" % len(names))
         return {"FINISHED"}
 
@@ -1231,6 +1301,7 @@ class NCP_OT_rebuild_handles(bpy.types.Operator):
         st.status = (st.status or "").split(" | рычаги")[0]
         if note:
             st.status = (st.status + "; " + note) if st.status else note
+        st.state = "DONE"
         self.report({"INFO"}, note or "Рычаги пересобраны")
         return {"FINISHED"}
 
@@ -1269,6 +1340,7 @@ class NCP_OT_set_mode(bpy.types.Operator):
             except Exception:
                 pass
             st.status = rep
+            st.state = "DONE"          # успех гасит прежнюю «Ошибку»
             self.report({"INFO"}, rep)
         except Exception as e:
             _fail(context, "Режим: %s: %s" % (type(e).__name__, e))
