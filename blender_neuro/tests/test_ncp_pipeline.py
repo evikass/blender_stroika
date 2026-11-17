@@ -682,6 +682,18 @@ bpye.io_utils = types.SimpleNamespace(ImportHelper=object)
 sys.modules["bpy_extras"] = bpye
 sys.modules["bpy_extras.io_utils"] = bpye.io_utils
 
+
+def _vu_stub(*_a, **_k):
+    raise NotImplementedError("view3d_utils вне Blender")
+
+
+bpye.view3d_utils = types.SimpleNamespace(
+    location_3d_to_region_2d=_vu_stub,
+    region_2d_to_origin_3d=_vu_stub,
+    region_2d_to_vector_3d=_vu_stub,
+)
+sys.modules["bpy_extras.view3d_utils"] = bpye.view3d_utils
+
 # ---- импорт модулей аддона (топ-левел для анализа + пакет для __init__)
 sys.path.insert(0, ADDON)
 import neuro_rig  # noqa: E402
@@ -1613,9 +1625,13 @@ pkg = importlib.util.module_from_spec(spec_imp)
 sys.modules["neuro_character_pipeline"] = pkg
 spec_imp.loader.exec_module(pkg)
 
-check("bl_info version 2.11.0", pkg.bl_info["version"] == (2, 11, 0),
+check("bl_info version 2.12.0", pkg.bl_info["version"] == (2, 12, 0),
       pkg.bl_info["version"])
+check("DRAG-состояние режима рычагов есть",
+      hasattr(pkg, "DRAG") and pkg.DRAG.get("on") is False)
 cls_names = [c.__name__ for c in pkg.classes]
+check("NCP_OT_drag_handles зарегистрирован",
+      "NCP_OT_drag_handles" in cls_names)
 check("NCP_OT_build_skeleton зарегистрирован",
       "NCP_OT_build_skeleton" in cls_names)
 panels = [n for n in cls_names if n.startswith("NCP_PT_")]
@@ -1660,7 +1676,7 @@ check("Body plan enum: AUTO/HUMAN/QUADRUPED/WINGED_QUAD/BIRD/DRAGON",
                       "BIRD", "DRAGON"}, bp_ids)
 with open(os.path.join(ADDON, "blender_manifest.toml"), "rb") as f:
     man = tomllib.load(f)
-check("manifest version 2.11.0", man["version"] == "2.11.0",
+check("manifest version 2.12.0", man["version"] == "2.12.0",
       man["version"])
 with open(os.path.join(ADDON, "INSTALL_RU.txt"), encoding="utf-8") as f:
     install_txt = f.read()
@@ -1672,6 +1688,7 @@ check("INSTALL_RU: секция 2.11.0 (пальцы/размер/управле
       "Размер рычагов" in install_txt)
 check("INSTALL_RU: секция 2.10.0 (GPU-карточка)",
       "ЧТО НОВОГО В 2.10.0" in install_txt and  # секция остаётся в истории
+      "ЧТО НОВОГО В 2.12.0" in install_txt and
       "ЧТО НОВОГО В 2.10.1" in install_txt and
       "GPU-карточка" in install_txt and
       "панель" in install_txt and
@@ -1890,6 +1907,7 @@ ik_pairs = [(pb.name, c.subtarget) for pb in arm_y.pose.bones
 check("v2.10.1: IK ноги на хелпере NCPK_*",
       any(n.startswith("NCPK_") for n, _s in ik_pairs), ik_pairs)
 
+
 # ======================= v2.11.0: руки ВНИЗ, кисть СОГНУТА (сценарий
 # пользователя-меха: скриншот v2.10.1 — кости пальцев поперёк пальцев)
 def build_hanging():
@@ -2020,6 +2038,103 @@ check("v2.11.0: NCP_Shape_* скрыты (hide_viewport/hide_render)",
           for k, a in (("Disc", "hide_render"), ("Ring", "hide_render"),
                        ("Disc", "hide_viewport"),
                        ("Ring", "hide_viewport"))))
+# ======================= F3. v2.12.0: антропометрия руки, валидация
+# пальцев, выносные рычаги (жалобы: «кости у локтя ниже чем меш»,
+# «кости пальцев съехали под локоть», «нет выносного рычага»)
+
+# ---- локоть на 0.42 размаха, запястье на 0.76; локоть/запястье НА руке
+res_a12 = nc.analyze(build_human_t(), base_spec=spec18)
+by_a = {l["name"]: l for l in res_a12["spec"]["links"]}
+yh_a = 0.82                      # кончики пальцев build_human_t (y0+0.18)
+ysh_a = by_a["shoulderP_L"]["com"][1]
+el_y_a = by_a["uarm_L"]["com"][1]
+wr_y_a = by_a["farm_L"]["com"][1]
+span_a = yh_a - ysh_a
+check("v2.12.0: локоть ~0.42 размаха (±0.08)",
+      abs((el_y_a - ysh_a) / span_a - 0.42) < 0.08,
+      (el_y_a, ysh_a, span_a))
+check("v2.12.0: запястье ~0.76 размаха (±0.08) и ПОСЛЕ локтя",
+      abs((wr_y_a - ysh_a) / span_a - 0.76) < 0.08 and
+      wr_y_a > el_y_a, (wr_y_a, el_y_a))
+# рука build_human_t лежит на z=1.36; вертикальная ладонь (z-размах
+# ~0.155) больше не тянет медиану локтя вниз
+check("v2.12.0: кость локтя НА руке по z (±0.02)",
+      abs(by_a["uarm_L"]["com"][2] - 1.36) < 0.02,
+      by_a["uarm_L"]["com"][2])
+check("v2.12.0: кость запястья на кисти по z (±0.03)",
+      abs(by_a["farm_L"]["com"][2] - 1.36) < 0.03,
+      by_a["farm_L"]["com"][2])
+
+# ---- валидация путей: пути у ЛОКТЯ отбрасываются, веер рисуется
+# от запястья (кости пальцев не могут съехать под локоть)
+arm_v = neuro_rig.build_armature(res_a12["spec"], name="NeuroCharV")
+nctl._edit_mode(arm_v)
+try:
+    eb_farm_v = arm_v.data.edit_bones.get("farm_L")
+    eh_v = np.array([eb_farm_v.head.x, eb_farm_v.head.y, eb_farm_v.head.z])
+finally:
+    nctl._object_mode()
+bad_paths = {"L": [tuple(tuple(float(c) for c in (eh_v + np.array(off)))
+                           for off in ((0.0, d, 0.02),
+                                       (0.0, d + 0.015, 0.02),
+                                       (0.0, d + 0.03, 0.02)))
+                   for d in (0.01, 0.04, 0.07, 0.10, 0.13)],
+             "R": []}
+made_v = neuro_rig.add_finger_chains(arm_v, scale=1.0,
+                                     finger_paths=bad_paths)
+check("v2.12.0: 20 пальцевых костей (веер вместо мусорных путей)",
+      made_v == 20, made_v)
+fng_v = arm_v.data.edit_bones.get("fng_thumb_1_L")
+dist_v = None
+if fng_v is not None:
+    dist_v = float(np.linalg.norm(
+        np.array([fng_v.head.x, fng_v.head.y, fng_v.head.z]) -
+        np.array([eb_farm_v.tail.x, eb_farm_v.tail.y,
+                  eb_farm_v.tail.z])))
+check("v2.12.0: пальцы у запястья, НЕ у локтя (< 0.09)",
+      dist_v is not None and dist_v < 0.09, dist_v)
+# мусорные пути НЕ создали кости у локтя
+if fng_v is not None:
+    d_elbow = float(np.linalg.norm(
+        np.array([fng_v.head.x, fng_v.head.y, fng_v.head.z]) - eh_v))
+    check("v2.12.0: база пальцев дальше 0.20 от локтя",
+          d_elbow > 0.20, d_elbow)
+
+# ---- выносной рычаг: CTRL_Arm торчит ЗА кисть, цель IK = его хвост
+arm_c = neuro_rig.build_armature(res_a12["spec"], name="NeuroCharC")
+nctl.build_controls(arm_c, ik_on=False, fingers=False, poles=False)
+cab = arm_c.data.edit_bones.get("CTRL_Arm_L")
+check("v2.12.0: CTRL_Arm_L создан", cab is not None)
+eb_f2 = arm_c.data.edit_bones.get("farm_L")
+if cab is not None and eb_f2 is not None:
+    fdir = (np.array([eb_f2.tail.x, eb_f2.tail.y, eb_f2.tail.z]) -
+            np.array([eb_f2.head.x, eb_f2.head.y, eb_f2.head.z]))
+    fdir = fdir / max(float(np.linalg.norm(fdir)), 1e-9)
+    chead = np.array([cab.head.x, cab.head.y, cab.head.z])
+    ctail = np.array([cab.tail.x, cab.tail.y, cab.tail.z])
+    wpos = np.array([eb_f2.tail.x, eb_f2.tail.y, eb_f2.tail.z])
+    # голова рычага В запястье, хвост ЗА кистью вдоль предплечья
+    check("v2.12.0: голова CTRL_Arm_L в запястье (< 0.01)",
+          float(np.linalg.norm(chead - wpos)) < 0.01,
+          float(np.linalg.norm(chead - wpos)))
+    out_v = ctail - wpos
+    check("v2.12.0: хвост CTRL_Arm_L ЗА кистью вдоль руки (> 0.04)",
+          float(out_v.dot(fdir)) > 0.04 and
+          float(np.linalg.norm(out_v - out_v.dot(fdir) * fdir)) < 0.02,
+          (float(out_v.dot(fdir)), float(np.linalg.norm(out_v))))
+cf = arm_c.data.edit_bones.get("CTRL_Foot_L")
+eb_f3 = arm_c.data.edit_bones.get("foot_L")
+if cf is not None and eb_f3 is not None:
+    fpos = np.array([eb_f3.head.x, eb_f3.head.y, eb_f3.head.z])
+    ftail = np.array([cf.tail.x, cf.tail.y, cf.tail.z])
+    check("v2.12.0: цель IK ноги осталась у голеностопа (< 0.01)",
+          float(np.linalg.norm(ftail - fpos)) < 0.01,
+          float(np.linalg.norm(ftail - fpos)))
+cfarm_pb = arm_c.pose.bones.get("farm_L")
+cik = [c for c in cfarm_pb.constraints if c.type == "IK"] \
+    if cfarm_pb is not None else []
+check("v2.12.0: IK руки на CTRL_Arm_L",
+      len(cik) == 1 and cik[0].subtarget == "CTRL_Arm_L", cik)
 
 print()
 

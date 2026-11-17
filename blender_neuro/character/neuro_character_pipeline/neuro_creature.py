@@ -1451,6 +1451,27 @@ def _human_finger_paths(arms, lm, xc, h):
                            "cu": cu, "L": Lq, "w": w}
         n_f = best["n"]
         fpaths = best["paths"]
+        # v2.12.0: пути обязаны лежать в слэбе КИСТИ (вдоль оси
+        # root->tip, поперёк не шире ладони), а кисть — размером с
+        # кисть. Мусорный блок в блобе руки (ремень, прядь, второй
+        # придаток) раньше давал "пальцы" в стороне от кисти — кости
+        # съезжали под локоть. Отсекли — остаётся веер по рамке кисти
+        ok = 0.05 * h <= nd <= 0.25 * h
+        if ok:
+            for fp in fpaths:
+                for p in fp:
+                    pv = np.asarray(p, dtype=float) - wr
+                    t = float(pv @ d)
+                    lat = float(np.linalg.norm(pv - d * t))
+                    if t < 0.20 * nd or t > 1.15 * nd or \
+                            lat > 0.85 * nd:
+                        ok = False
+                        break
+                if not ok:
+                    break
+        if not ok:
+            fpaths = []
+            n_f = 0
         out[sfx] = {
             "paths": [tuple(map(tuple, fp)) for fp in fpaths]
             if n_f >= 3 else [],

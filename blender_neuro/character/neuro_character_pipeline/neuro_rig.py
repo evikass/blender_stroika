@@ -421,6 +421,43 @@ def add_finger_chains(arm_obj, scale=1.0, finger_paths=None, mesh_obj=None):
                 if len(cand) >= 3:
                     paths = _order_finger_paths(cand, eb_p, arm_dir)
                     fan = None                      # веер не нужен
+
+            # -- v2.12.0: контроль путей относительно РЕАЛЬНОЙ кости
+            # farm. Каждый путь обязан висеть ПЕРЕД запястьем вдоль
+            # предплечья и не дальше ладони от оси; рамка веера —
+            # наружу от запястья и размером с кисть. Нарушение —
+            # набор/рамка отбрасываются (анатомический веер от
+            # запястья): кости пальцев физически не могут съехать под
+            # локоть (жалоба 2.11)
+            f_len = max(float((Vector(eb_p.tail) -
+                               Vector(eb_p.head)).length), 1e-6)
+            wr_v = Vector(eb_p.tail)
+            if paths is not None:
+                ok = True
+                for fp in paths:
+                    for q in fp:
+                        dv = Vector(q) - wr_v
+                        t = dv.dot(arm_dir)
+                        lat = (dv - arm_dir * t).length
+                        if t < -0.10 * f_len or t > 0.90 * f_len or \
+                                lat > 0.85 * f_len:
+                            ok = False
+                            break
+                    if not ok:
+                        break
+                if not ok:
+                    paths = None
+                    fan = None
+            if fan is not None:
+                fd = Vector(fan.get("d") or (0.0, 0.0, 0.0))
+                L = float(fan.get("L", 0.0))
+                w = float(fan.get("w", 0.0))
+                h_lim = 1.70 * max(scale, 0.05)
+                if fd.length < 1e-9 or \
+                        float(fd.normalized().dot(arm_dir)) < -0.3 or \
+                        not (0.04 * h_lim <= L <= 0.30 * h_lim) or \
+                        w > 1.5 * max(L, 1e-9):
+                    fan = None
         if paths is not None:
             for (fname, _op, _od, _ln), fp in zip(FINGER_PLAN, paths):
                 pts = [Vector(fp[0]), Vector(fp[1]), Vector(fp[2])]

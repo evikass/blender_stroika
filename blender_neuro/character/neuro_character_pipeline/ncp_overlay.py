@@ -535,6 +535,7 @@ WHY = {
     "ncp.set_mode": "сначала постройте скелет (вкладка «Скелет»)",
     "ncp.record_key": "сначала постройте скелет (вкладка «Скелет»)",
     "ncp.select_handles": "нет рычагов: постройте скелет или Пересобрать",
+    "ncp.drag_handles": "нет рычагов: постройте скелет или Пересобрать",
     "ncp.rebuild_handles": "сначала постройте скелет (вкладка «Скелет»)",
 }
 
@@ -772,6 +773,21 @@ def _build(context, region):
                        ("mode", "TPOSE")),
                       ("Анимация", st.rig_mode == "ANIM", "mode",
                        ("mode", "ANIM"))], h=30.0)
+            drag_on = False
+            try:
+                drag_on = bool(pkg.DRAG.get("on")) \
+                    if pkg is not None and getattr(pkg, "DRAG", None) \
+                    else False
+            except Exception:
+                drag_on = False
+            chip_row([("Двигать мышью", drag_on, "drag",
+                       ("op", "ncp.drag_handles"))], h=30.0)
+            if drag_on:
+                clabel("ЛКМ по рычагу — тащить; Esc — выход", ACCENT)
+            else:
+                hint("ЛКМ по рычагу + тянуть = персонаж двигается за "
+                     "мышью. Классика: клик по рычагу, G — двигать, "
+                     "R — вращать, ЛКМ — применить, Esc — отмена")
             hint("Анимация: тяните рычаги — персонаж двигается. "
                  "T-Поза: rest, IK выключен")
             rule()
@@ -804,6 +820,7 @@ def _build(context, region):
             switch("Рычаги пальцев", st, "ctrl_fingers", tip="fhands")
             switch("Скрыть кости скелета", st, "ctrl_hide_deform",
                    tip="hide")
+
             label("Размер рычагов", gap=13.0)
             chip_row([("Мелко", abs(st.ctrl_size - 0.6) < 0.01,
                        "size", ("enum", (st, "ctrl_size", 0.6))),
@@ -815,6 +832,10 @@ def _build(context, region):
                  "диски — пальцы, Root — весь персонаж. Тяните их в "
                  "режиме Анимация; на скелет они не влияют. «Показать» "
                  "прячет/возвращает все рычаги разом")
+            hint("Кольца — суставы; выносные рукоятки ЗА кистями/ступнями "
+                 "— IK конечности; оранжевые диски — пальцы; Root — весь "
+                 "персонаж. Рычаги не деформируют меш")
+
 
     # ---- сказать в ответ -----------------------------------------------------
     note = _state.get("note")

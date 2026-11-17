@@ -752,10 +752,24 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
             name = _handle_name(ch["kind"], ch["side"], ch["qual"], used)
             par = "CTRL_Body" if ch["kind"] in ("head", "tail", "wing") \
                 else "CTRL_Root"
-            # цель IK = хвост рычага (use_tail=True) — кончик рычага
-            # ровно в суставе, кость рычага уходит назад за сустав
-            hl = max(0.06 * h, min(tip.length * 0.5, 0.12 * h))
-            new_ctrl(name, anchor - d * hl, anchor, parent=par)
+            if ch["kind"] == "leg":
+                # нога: цель IK у голеностопа, кость рычага уходит от
+                # ступни назад к пятке. Выносить цель ЗА носок нельзя —
+                # недостижимая цель тянула бы прямую ногу вперёд
+                hl = max(0.09 * h, min(tip.length * 0.7, 0.16 * h))
+                new_ctrl(name, anchor - d * hl, anchor, parent=par)
+                ch["target"] = anchor
+            else:
+                # ВЫНОСНОЙ РЫЧАГ (v2.12.0): голова в суставе, хвост ЗА
+                # кончиком конечности (за кисть/крыло/голову). IK-цель
+                # = хвост рычага; на прямой конечности цель вне
+                # досягаемости не меняет позу (конечность уже вытянута
+                # в её сторону), а сам рычаг торчит наружу — его видно
+                # и легко схватить мышью
+                hl = max(0.10 * h, min(tip.length * 0.6, 0.20 * h))
+                tgt = anchor + d * hl
+                new_ctrl(name, anchor, tgt, parent=par)
+                ch["target"] = tgt
             ch["handle"] = name
             # v2.11.0: кольцо сустава — по ТОЛЩИНЕ СВОЕЙ конечности
             # (0.5 длины концевой кости, рамка 0.02h..0.07h), а не

@@ -14,7 +14,7 @@ Neuro Character Pipeline — мастер-аддон, связывающий:
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 11, 0),
+    "version": (2, 12, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP (GPU-карточка) | "
                 "Properties > Scene",
@@ -26,6 +26,7 @@ bl_info = {
 
 import json
 import importlib
+import math
 import os
 import socket
 import subprocess
@@ -36,7 +37,9 @@ from urllib.parse import urlparse
 import bpy
 from bpy.props import (BoolProperty, EnumProperty, FloatProperty,
                        IntProperty, PointerProperty, StringProperty)
+from bpy_extras import view3d_utils
 from bpy_extras.io_utils import ImportHelper
+from mathutils import Matrix
 
 if "ncp_comfy" in locals():  # reload при правках в текст-редакторе
     import importlib
@@ -1349,6 +1352,177 @@ class NCP_OT_set_mode(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# состояние режима перетаскивания рычагов (виден и GPU-карточке)
+DRAG = {"on": False, "stop": False, "drag": None}
+
+
+class NCP_OT_drag_handles(bpy.types.Operator):
+    """Перетаскивание рычагов мышью без G: ЛКМ по рычагу — тащить,
+    отпускание кнопки — применить, Esc/ПКМ — выйти из режима."""
+    bl_idname = "ncp.drag_handles"
+    bl_label = "Drag Handles (mouse)"
+    bl_description = ("Режим «хватай мышью»: ЛКМ по оранжевому рычагу "
+                      "(кольцу/диску/выносной рукоятке) и тяните — "
+                      "персонаж двигается за мышью. Отпускание кнопки "
+                      "фиксирует, Esc или ПКМ выключает режим")
+    bl_options = {"REGISTER"}
+
+    PICK_PX = 56.0          # радиус захвата в пикселях (1x)
+
+    @classmethod
+    def poll(cls, context):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        return arm is not None and arm.type == "ARMATURE"
+
+    # ------------------------------------------------------------- утилиты
+    @staticmethod
+    def _redraw(context):
+        try:
+            for area in context.window.screen.areas:
+                if area.type == "VIEW_3D":
+                    area.tag_redraw()
+        except Exception:
+            pass
+
+    def _handles(self, arm):
+        out = []
+        try:
+            for pb in arm.pose.bones:
+                if pb.name.startswith("CTRL_"):
+                    out.append(pb)
+        except Exception:
+            pass
+        return out
+
+    # ------------------------------------------------------------- рантайм
+    def invoke(self, context, event):
+        arm = bpy.data.objects.get("NeuroCharacter")
+        if arm is None or arm.type != "ARMATURE":
+            self.report({"ERROR"}, "Скелет NeuroCharacter не построен")
+            return {"CANCELLED"}
+        if not neuro_controls.has_handles(arm):
+            self.report({"ERROR"}, "На скелете нет рычагов — "
+                                   "нажмите «Пересобрать»")
+            return {"CANCELLED"}
+        if DRAG.get("on"):
+            DRAG["stop"] = True      # работающий экземпляр выйдет сам
+            self.report({"INFO"}, "Режим рычагов выключен")
+            self._redraw(context)
+            return {"FINISHED"}
+        if context.area is None or context.area.type != "VIEW_3D":
+            self.report({"ERROR"}, "Запускайте из 3D-вьюпорта")
+            return {"CANCELLED"}
+        DRAG.update(on=True, stop=False, drag=None,
+                    region=context.region, rv3d=context.region_data,
+                    arm=arm.name)
+        context.window_manager.modal_handler_add(self)
+        self.report({"INFO"}, "Рычаги: ЛКМ — тащить, отпускание — "
+                              "применить, Esc — выход")
+        self._redraw(context)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if DRAG.get("stop") or event.type == "ESC":
+            DRAG.update(on=False, stop=False, drag=None)
+            self._redraw(context)
+            try:
+                self.report({"INFO"}, "Режим рычагов выключен")
+            except Exception:
+                pass
+            return {"FINISHED"}
+        region = DRAG.get("region")
+        rv3d = DRAG.get("rv3d")
+        if region is None or rv3d is None:
+            return {"PASS_THROUGH"}
+        arm = bpy.data.objects.get(DRAG.get("arm") or "")
+        if arm is None:
+            DRAG.update(on=False, drag=None)
+            return {"FINISHED"}
+        mx, my = event.mouse_region_x, event.mouse_region_y
+        drag = DRAG.get("drag")
+
+        if drag is not None:
+            if event.type == "MOUSEMOVE" or \
+                    (event.type == "LEFTMOUSE" and event.value == "PRESS"):
+                self._apply_drag(context, arm, drag, region, rv3d,
+                                 (float(mx), float(my)))
+                return {"RUNNING_MODAL"}
+            if event.type == "LEFTMOUSE" and event.value == "RELEASE":
+                DRAG["drag"] = None
+                self._redraw(context)
+                return {"RUNNING_MODAL"}
+            return {"RUNNING_MODAL"}
+
+        if event.type == "LEFTMOUSE" and event.value == "PRESS":
+            hit = self._pick_handle(arm, region, rv3d, (float(mx),
+                                                        float(my)))
+            if hit is None:
+                return {"PASS_THROUGH"}    # Blender: выбор/орбита как обычно
+            try:
+                context.view_layer.update()
+                pb = arm.pose.bones.get(hit)
+                T0 = (arm.matrix_world @ pb.matrix).to_translation()
+                n = view3d_utils.region_2d_to_vector_3d(region, rv3d,
+                                                        (mx, my))
+                if n.length < 1e-6:
+                    return {"PASS_THROUGH"}
+                DRAG["drag"] = {"pb": hit, "T0": T0.copy(), "n": n.normalized(),
+                                "matrix0": pb.matrix.copy()}
+            except Exception:
+                DRAG["drag"] = None
+                return {"PASS_THROUGH"}
+            self._redraw(context)
+            return {"RUNNING_MODAL"}
+
+        if event.type == "RIGHTMOUSE" and event.value == "PRESS":
+            DRAG.update(on=False, drag=None)
+            self._redraw(context)
+            self.report({"INFO"}, "Режим рычагов выключен")
+            return {"FINISHED"}
+
+        return {"PASS_THROUGH"}
+
+    # ------------------------------------------------------------- математика
+    def _pick_handle(self, arm, region, rv3d, m):
+        best, bd = None, None
+        for pb in self._handles(arm):
+            try:
+                mid = arm.matrix_world @ (0.5 * (pb.head + pb.tail))
+                sc = view3d_utils.location_3d_to_region_2d(region, rv3d,
+                                                           mid)
+            except Exception:
+                continue
+            if sc is None:
+                continue
+            d = math.hypot(sc.x - m[0], sc.y - m[1])
+            if bd is None or d < bd:
+                best, bd = pb.name, d
+        if best is None or bd > self.PICK_PX:
+            return None
+        return best
+
+    def _apply_drag(self, context, arm, drag, region, rv3d, m):
+        try:
+            pb = arm.pose.bones.get(drag["pb"])
+            if pb is None:
+                DRAG["drag"] = None
+                return
+            origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, m)
+            direc = view3d_utils.region_2d_to_vector_3d(region, rv3d, m)
+            n = drag["n"]
+            denom = float(direc.dot(n))
+            if abs(denom) < 1e-6:
+                return
+            t = float((drag["T0"] - origin).dot(n)) / denom
+            p = origin + direc * t
+            D = p - drag["T0"]
+            D_arm = arm.matrix_world.inverted().to_3x3() @ D
+            pb.matrix = Matrix.Translation(D_arm) @ drag["matrix0"]
+            context.view_layer.update()
+        except Exception:
+            DRAG["drag"] = None
+
+
 class NCP_OT_record_key(bpy.types.Operator):
     bl_idname = "ncp.record_key"
     bl_label = "Record Layer Key"
@@ -2178,6 +2352,12 @@ class NCP_PT_handles(_NCPSubPanel):
                      icon="RESTRICT_SELECT_OFF")
         row.operator("ncp.rebuild_handles", text="Rebuild",
                      icon="FILE_REFRESH")
+        _big(lay, "ncp.drag_handles", "Drag Handles (mouse)",
+             icon="LOOP_BACK")
+        _hint(lay, "Drag Handles: ЛКМ по рычагу — тащить персонажа "
+                   "мышью (отпускание — применить, Esc — выйти). "
+                   "Ручной способ: клик по рычагу, G — двигать, "
+                   "R — вращать")
         _hint(lay, "Тяните рычаг мышью: Root — весь персонаж, Body — "
                    "корпус (голова/хвост/крылья вместе), Foot/Arm — "
                    "конечности через IK. Полюс — направление сгиба "
@@ -2437,6 +2617,7 @@ classes = (
     NCP_OT_select_handles,
     NCP_OT_rebuild_handles,
     NCP_OT_set_mode,
+    NCP_OT_drag_handles,
     NCP_OT_record_key,
     NCP_OT_add_muscles,
     NCP_OT_attach_muscles,

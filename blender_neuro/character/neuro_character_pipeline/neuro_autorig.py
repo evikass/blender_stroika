@@ -154,6 +154,23 @@ def _median_z_of(pts, z0, h, y_lo, y_hi):
     return float(np.median(pts[sel, 2]))
 
 
+def _median_z_trim(pts, z0, h, y_lo, y_hi, trim):
+    """Медианная z полосы с усечением по второму проходу: медиана
+    сначала по всей полосе, потом только по вершинам в пределах
+    1.4*trim (толщина руки) от неё. Вертикальная ладонь/пояс/пряди
+    в полосе больше не уводят "локоть" вниз от центра руки."""
+    y = np.abs(pts[:, 1])
+    sel = (y >= y_lo) & (y <= y_hi)
+    if int(sel.sum()) < 5:
+        return None
+    zs = pts[sel, 2]
+    m = float(np.median(zs))
+    keep = np.abs(zs - m) <= 1.4 * max(float(trim), 0.02 * h)
+    if int(keep.sum()) >= 5:
+        return float(np.median(zs[keep]))
+    return m
+
+
 # ------------------------------------------------------------- анализ
 
 def analyze_humanoid(pts):
@@ -287,15 +304,45 @@ def analyze_humanoid(pts):
                           ((y_handL - y_sh) / h))
     av = _arm_verts(pts, z0, h, max(0.30, crotch_n - 0.05), y_sh, y_handL)
 
+    # ---- толщина руки (для радиусов костей и ремешка медиан):
+    # вертикальный размах рук в полосе середины плеча. Считается ДО
+    # arm_pts: усечение медиан z локтя/запястья ведётся от толщины
+    # руки (v2.12.0)
+    arm_th = 0.09 * h
+    if len(av) > 20:
+        mid_y = 0.5 * (y_sh + y_handL)
+        band = av[np.abs(av[:, 1]) > mid_y - 0.05 * h]
+        band = band[np.abs(band[:, 1]) < mid_y + 0.05 * h]
+        if len(band) > 15:
+            arm_th = float(np.percentile(band[:, 2], 92) -
+                           np.percentile(band[:, 2], 8))
+            arm_th = min(max(arm_th, 0.03 * h), 0.16 * h)
+
     def arm_pts(side):
         yh = y_handL if side > 0 else y_handR
         yh = abs(yh)
-        elbow_y = 0.5 * (y_sh + yh)
-        wrist_y = yh - 0.11 * max(yh - y_sh, 1e-6)
-        ez = _median_z_of(av, z0, h,
-                          elbow_y - 0.06 * h, elbow_y + 0.06 * h)
-        wz = _median_z_of(av, z0, h,
-                          wrist_y - 0.05 * h, yh)
+        # анатомические доли размаха (y_sh -> yh): плечевой сустав ->
+        # локоть ~0.42, локоть -> запястье ~0.34, кисть ~0.24 (верхняя
+        # конечность 0.19h+0.15h+0.11h от 0.44h). Раньше локоть брали
+        # на 0.50, запястье на 0.89: "запястье" попадало В ЛАДОНЬ,
+        # предплеченая кость farm залезала в кисть вплоть до кончиков
+        # (скриншот 2.11: длинная кость сквозь перчатку до пальцев),
+        # а рычаги пальцев строились от ладони и уезжали под локоть
+        el_frac, wr_frac = 0.42, 0.76
+        elbow_y = y_sh + el_frac * (yh - y_sh)
+        wrist_y = y_sh + wr_frac * (yh - y_sh)
+        # полосы z УЖЕ (±0.035h) и вокруг НАСТОЯЩИХ точек: прежние
+        # ±0.06h ловили вертикальную ладонь (T-pose, пальцы вверх/вниз
+        # — размах кисти по z до 0.18 м) и медиана "локтя" съезжала
+        # ВНИЗ от центра руки ("кости у локтя ниже чем меш"). Второй
+        # проход отбрасывает хвосты распределения (ремешок ±1.4 толщины
+        # руки) — остаточные выбросы (пояс/волосы) не тянут медиану
+        ez = _median_z_trim(av, z0, h,
+                            elbow_y - 0.035 * h, elbow_y + 0.035 * h,
+                            arm_th)
+        wz = _median_z_trim(av, z0, h,
+                            wrist_y - 0.030 * h, wrist_y + 0.030 * h,
+                            arm_th)
         if ez is None:
             ez = shoulder_z
         if wz is None:
@@ -329,18 +376,6 @@ def analyze_humanoid(pts):
 
     elL_y, elL_z, wrL_y, wrL_z, shL_x, elL_x, wrL_x = arm_pts(+1)
     elR_y, elR_z, wrR_y, wrR_z, shR_x, elR_x, wrR_x = arm_pts(-1)
-
-    # ---- толщина руки (для радиусов костей): вертикальный размах рук
-    # в полосе середины плеча
-    arm_th = 0.09 * h
-    if len(av) > 20:
-        mid_y = 0.5 * (y_sh + y_handL)
-        band = av[np.abs(av[:, 1]) > mid_y - 0.05 * h]
-        band = band[np.abs(band[:, 1]) < mid_y + 0.05 * h]
-        if len(band) > 15:
-            arm_th = float(np.percentile(band[:, 2], 92) -
-                           np.percentile(band[:, 2], 8))
-            arm_th = min(max(arm_th, 0.03 * h), 0.16 * h)
 
     # ---- шея/голова
     head_band = [s for s in sl[int(0.88 * NBINS):] if s]
