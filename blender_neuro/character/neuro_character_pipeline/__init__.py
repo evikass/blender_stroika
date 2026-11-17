@@ -14,7 +14,7 @@ Neuro Character Pipeline — мастер-аддон, связывающий:
 bl_info = {
     "name": "Neuro Character Pipeline",
     "author": "blender_neuro",
-    "version": (2, 12, 0),
+    "version": (2, 13, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > N-panel > NCP (GPU-карточка) | "
                 "Properties > Scene",
@@ -371,6 +371,16 @@ def _build_rig(context, mesh):
         mesh, spec, rot_x_deg=rot_x, rot_z_deg=rot_z,
         do_apply=st.apply_transforms)
     neuro_rig.skin_mesh_to_armature(mesh, arm)
+    if st.add_fingers:
+        # v2.13.0: гарантированный скининг пальцев (автовеса часто
+        # отдают вершины пальцев кости предплечья)
+        try:
+            fingers_note = neuro_rig.fix_finger_weights(mesh, arm)
+        except Exception:
+            fingers_note = ""
+    else:
+        fingers_note = ""
+    place_note = neuro_rig.check_bone_placement(arm, mesh)
     ctrl_note = _add_controls(context, arm)
     if st.orient_auto and (abs(rot_x) > 1e-6 or abs(rot_z) > 1e-6):
         _st(context).status = ("Меш повёрнут (авто): X%+g°, Z%+g° — "
@@ -379,6 +389,10 @@ def _build_rig(context, mesh):
     if ctrl_note:
         st_cur = _st(context)
         st_cur.status = (st_cur.status + "; " + ctrl_note).strip("; ")
+    for extra in (fingers_note, place_note):
+        if extra:
+            st_cur = _st(context)
+            st_cur.status = (st_cur.status + "; " + extra).strip("; ")
     return arm
 
 
@@ -444,10 +458,22 @@ def _build_rig_auto(context, mesh, spec, rot_x, rot_z):
         if res["notes"]:
             arm["ncp_notes"] = "; ".join(res["notes"])
     neuro_rig.skin_mesh_to_armature(mesh, arm)
+    # v2.13.0: гарантированный скининг пальцев — автовеса (bone heat)
+    # на мешах Image-to-3D отдают вершины пальцев кости предплечья;
+    # правим по геометрии (работает для human и creature fng_*)
+    try:
+        fingers_note = neuro_rig.fix_finger_weights(mesh, arm)
+    except Exception:
+        fingers_note = ""
+    place_note = neuro_rig.check_bone_placement(arm, mesh)
     ctrl_note = _add_controls(context, arm)
     if st.debug_landmarks:
         neuro_creature.make_landmarks(res["joints"], res["h"])
     note = fingers_geo_note
+    if fingers_note:
+        note += "; " + fingers_note
+    if place_note:
+        note += "; кости на меше: " + place_note
     if st.orient_auto:
         if abs(rot_x) > 1e-6:
             note += "; меш поднят из лежачего положения (rot X %+g)" % rot_x

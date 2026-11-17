@@ -648,6 +648,150 @@ def _pole_angle_for(eb1, rootpos, target, bend_dir):
     return theta
 
 
+def _hinge_axis(bone, bend):
+    """Какая локальная ось кости сгибает сустав В сторону bend.
+
+    bend — мировое направление сгиба (перпендикулярно кости). Ось
+    шарнира = cross(Y_кости, bend); ищем локальную ось (X или Z),
+    параллельную шарниру. Возвращает ("x"|"z", flip) где flip=True
+    если положительный поворот вокруг локальной оси сгибает ОТ bend.
+    """
+    m = bone.matrix_local
+    y = Vector((m[0][1], m[1][1], m[2][1]))
+    if y.length < 1e-9:
+        return None, False
+    y = y.normalized()
+    b = bend - y * bend.dot(y)
+    if b.length < 1e-9:
+        return None, False
+    b = b.normalized()
+    hinge = y.cross(b)                       # вращение вокруг hinge
+    ax = Vector((m[0][0], m[1][0], m[2][0]))
+    az = Vector((m[0][2], m[1][2], m[2][2]))
+    dx, dz = ax.dot(hinge), az.dot(hinge)
+    if abs(dx) >= abs(dz):
+        return "x", dx < 0.0
+    return "z", dz < 0.0
+
+
+def _apply_ik_limits(arm_obj, chains, fchains):
+    """Ограничители IK-суставов (v2.13.0) — use_ik_limit_* на костях
+    IK-цепей. Стандартный солвер уважает их: колено/локоть/палец
+    сгибаются только в анатомическую сторону и не выкручиваются
+    наизнанку (жалоба 2.12 «кости сгибаются под неправильными
+    углами, проворачиваются наизнанку»).
+
+    Лимиты действуют ТОЛЬКО на решение IK (FK и нейроанимация —
+    абсолютные матрицы — не ограничены), поэтому ставятся на
+    вспомогательные кости: NCPK-хелперы ног/рук human-контракта,
+    сами кости у creature-планов и пальцев. Остовные кости спеки
+    не трогаются. Наклон плеча/бедра (первая кость цепи) не
+    ограничивается — ограничен только твист."""
+    for ch in chains:
+        host = ch.get("ik_host") or ch.get("ik_names") or []
+        if not host:
+            continue
+        kind = ch["kind"]
+        bend = ch.get("bend_dir")
+        pose = arm_obj.pose.bones
+        for i, bn in enumerate(host):
+            pb = pose.get(bn)
+            bone = arm_obj.data.bones.get(bn)
+            if pb is None or bone is None:
+                continue
+            try:
+                # твист вокруг оси кости: ноги почти не крутятся;
+                # у ПРЕДПЛЕЧЬЯ и пальцев твист-канал ЗАМКН (lock_ik_y):
+                # стандартный солвер имеет систематический дрейф по
+                # твисту на зеркальных (R) цепях — на bpy 5.3 farm_R
+                # самопроизвольно скручивалась на 27° при включении IK
+                # (жалоба «кости проворачиваются»); замок твиста
+                # обнуляет дрейф, сгиб (шарнир) не затрагивает
+                tlim = (0.0, 0.0)
+                lock_y = False
+                if kind == "leg":
+                    tlim = (-25.0, 25.0) if i == 0 else (-12.0, 12.0)
+                elif kind == "arm":
+                    if i == 0:
+                        tlim = (-45.0, 45.0)
+                    else:
+                        lock_y = True
+                elif kind == "wing":
+                    tlim = (-45.0, 45.0)
+                elif kind == "tail":
+                    tlim = (-50.0, 50.0)
+                elif kind == "head":
+                    tlim = (-85.0, 85.0)
+                if lock_y:
+                    try:
+                        pb.lock_ik_y = True
+                    except Exception:
+                        pass
+                elif tlim != (0.0, 0.0):
+                    pb.use_ik_limit_y = True
+                    pb.ik_min_y = math.radians(tlim[0])
+                    pb.ik_max_y = math.radians(tlim[1])
+                # шарнир (односторонний сгиб) — со второй кости цепи
+                if bend is not None and i >= 1:
+                    ax, flip = _hinge_axis(bone, bend)
+                    if ax is None:
+                        continue
+                    lo, hi = (0.0, 150.0)
+                    if flip:
+                        lo, hi = -150.0, 0.0
+                    setattr(pb, "use_ik_limit_" + ax, True)
+                    setattr(pb, "ik_min_" + ax, math.radians(lo))
+                    setattr(pb, "ik_max_" + ax, math.radians(hi))
+                    # вторая поперечная ось: небольшой запас
+                    oax = "z" if ax == "x" else "x"
+                    setattr(pb, "use_ik_limit_" + oax, True)
+                    setattr(pb, "ik_min_" + oax, math.radians(-12.0))
+                    setattr(pb, "ik_max_" + oax, math.radians(12.0))
+            except Exception:
+                pass
+    # пальцы: сгиб к ладони до 115°, разгибание всего 12°, твист ±12°,
+    # боковой люфт ±10° — узкий конверт не даёт солверу «дрейфовать»
+    # по многообразию решений при включении IK (снап пальцев 2.12)
+    for fc in fchains:
+        bend = None
+        try:
+            pb0 = arm_obj.pose.bones.get(fc["bones"][0])
+            if pb0 is not None:
+                m = pb0.bone.matrix_local
+                y = Vector((m[0][1], m[1][1], m[2][1])).normalized()
+                d = Vector((0.0, 0.0, -1.0))
+                bend = d - y * d.dot(y)
+                if bend.length < 1e-6:
+                    bend = Vector((1.0, 0.0, 0.0))
+                bend = bend.normalized()
+        except Exception:
+            bend = None
+        for j, bn in enumerate(fc["bones"]):
+            pb = arm_obj.pose.bones.get(bn)
+            bone = arm_obj.data.bones.get(bn)
+            if pb is None or bone is None:
+                continue
+            try:
+                # твист пальцев замкнут (дрейф солвера на R-цепях)
+                try:
+                    pb.lock_ik_y = True
+                except Exception:
+                    pass
+                if bend is not None:
+                    ax, flip = _hinge_axis(bone, bend)
+                    if ax is not None:
+                        lo, hi = (-115.0, 12.0) if flip else (-12.0, 115.0)
+                        setattr(pb, "use_ik_limit_" + ax, True)
+                        setattr(pb, "ik_min_" + ax, math.radians(lo))
+                        setattr(pb, "ik_max_" + ax, math.radians(hi))
+                        oax = "z" if ax == "x" else "x"
+                        setattr(pb, "use_ik_limit_" + oax, True)
+                        setattr(pb, "ik_min_" + oax, math.radians(-10.0))
+                        setattr(pb, "ik_max_" + oax, math.radians(10.0))
+            except Exception:
+                pass
+
+
 def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
                    poles=True):
     """Собрать слой рычагов. Возвращает короткий отчёт (строка).
@@ -753,11 +897,15 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
             par = "CTRL_Body" if ch["kind"] in ("head", "tail", "wing") \
                 else "CTRL_Root"
             if ch["kind"] == "leg":
-                # нога: цель IK у голеностопа, кость рычага уходит от
-                # ступни назад к пятке. Выносить цель ЗА носок нельзя —
-                # недостижимая цель тянула бы прямую ногу вперёд
+                # нога: ГОЛОВА рычага — В ГОЛЕНОСТОПЕ (это и есть точка
+                # IK-цели: на Blender 4/5 use_tail=True тянет конец цепи
+                # к ГОЛОВЕ рычага — проверено на bpy 5.3), хвост торчит
+                # ВПЕРЕД за носок как рукоятка. Раньше голова была у
+                # пятки: солвер тянул голеностоп К ПЯТКЕ (13-15 см) и
+                # вся нога скручивалась при включении IK (жалоба 2.12:
+                # «кости проворачиваются наизнанку»)
                 hl = max(0.09 * h, min(tip.length * 0.7, 0.16 * h))
-                new_ctrl(name, anchor - d * hl, anchor, parent=par)
+                new_ctrl(name, anchor, anchor + d * hl, parent=par)
                 ch["target"] = anchor
             else:
                 # ВЫНОСНОЙ РЫЧАГ (v2.12.0): голова в суставе, хвост ЗА
@@ -847,29 +995,37 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
                       "host=", ch.get("ik_host"),
                       "ikn=", ch.get("ik_names"))
 
+        # -- направление сгиба коленей/локтей: нужно полюсам И лимитам
+        # (v2.13.0: считается ВСЕГДА, не только с полюсами)
+        face = _avg_dir(toe_dirs, Vector((1.0, 0.0, 0.0)))
+        for ch in chains:
+            host = ch.get("ik_host") or []
+            ch["bend_dir"] = None
+            if ch["kind"] not in ("leg", "arm") or len(host) != 2:
+                continue
+            eb1, eb2 = ebs.get(host[0]), ebs.get(host[1])
+            if eb1 is None or eb2 is None:
+                continue
+            ch["bend_dir"] = _pole_bend_dir(eb1, ch["anchor"], face,
+                                            ch["kind"], ch["qual"])
+
         # -- полюсы коленей/локтей: только 2-бонные leg/arm цепи
         if poles:
-            face = _avg_dir(toe_dirs, Vector((1.0, 0.0, 0.0)))
             for ch in chains:
+                kdir = ch.get("bend_dir")
                 host = ch.get("ik_host") or []
-                if ch["kind"] not in ("leg", "arm") or len(host) != 2:
+                if kdir is None or len(host) != 2:
                     continue          # полюс — только для 2-бонных цепей
-                eb1, eb2 = ebs.get(host[0]), ebs.get(host[1])
-                if eb1 is None or eb2 is None:
-                    continue
-                kdir = _pole_bend_dir(eb1, ch["anchor"], face,
-                                      ch["kind"], ch["qual"])
-                if kdir is None:
-                    continue
-                joint = "Knee" if ch["kind"] == "leg" else "Elbow"
-                base = "CTRL_Pole_%s%s%s" % (joint, ch["qual"] or "",
-                                             ch["side"] or "")
+                base = "CTRL_Pole_%s%s%s" % (
+                    "Knee" if ch["kind"] == "leg" else "Elbow",
+                    ch["qual"] or "", ch["side"] or "")
                 pname = base
                 i = 2
                 while pname in used:
                     pname = "%s_%d" % (base, i)
                     i += 1
                 used.add(pname)
+                eb1, eb2 = ebs.get(host[0]), ebs.get(host[1])
                 rootpos = Vector((eb1.head.x, eb1.head.y, eb1.head.z))
                 kneepos = Vector((eb2.head.x, eb2.head.y, eb2.head.z))
                 chain_len = float((ch["anchor"] - rootpos).length)
@@ -927,12 +1083,34 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
                 c.subtarget = handle
                 c.chain_count = min(3, len(host))
                 # 2.8.0: use_tail=True — конечная кость В цепи, конец
-                # цепи (ступня/кисть/кончик) тянется к хвосту рычага.
-                # В 2.7.0 стояло False: Blender исключал конечную кость
-                # и тянул к рычагу колено/локоть вместо ступни/кисти
-                c.use_tail = True
+                # цепи (ступня/кисть/кончик) тянется к рычагу.
+                # ВАЖНО (проверено на bpy 5.3): use_tail=True тянет
+                # конец цепи к ГОЛОВЕ рычага, use_tail=False — к ХВОСТУ.
+                # Все цепи, кроме пальцев: голова рычага в суставе
+                # (голеностоп/запястье/кончик крыла/хвоста/макушка) ->
+                # use_tail=True (и перетаскивание, и вращение живут).
+                # Пальцы: голова диска на 2-4 см ДО кончика (рычаг
+                # торчит назад) — цель = ХВОСТ диска (на кончике):
+                # use_tail=False. В 2.12 у ног цель фактически
+                # оказывалась У ПЯТКИ (голова рычага) — нога
+                # скручивалась при включении IK
+                c.use_tail = ch["kind"] in ("leg", "arm", "head",
+                                            "tail", "wing")
                 try:
                     c.use_stretch = False
+                except Exception:
+                    pass
+                # v2.13.0: вращение рычага передаётся концу цепи
+                # (кольца поворачивают кисть/стопу/голову). Rest-рамки
+                # рычага и концевой кости совпадают (рычаг строится
+                # вдоль той же кости с roll=0) — снапа при включении
+                # IK нет (проверено: снап 0.0°, передача 1:1).
+                # Голова/хвост/крылья: цель (хвост рычага) вне
+                # досягаемости и солвер её игнорирует — вращение кольца
+                # ЕДИНСТВЕННЫЙ способ поворачивать их из позы
+                try:
+                    c.use_rotation = ch["kind"] in ("arm", "head",
+                                                    "tail", "wing")
                 except Exception:
                     pass
             except Exception:
@@ -987,13 +1165,31 @@ def build_controls(arm_obj, ik_on=True, hide_deform=False, fingers=True,
             c.target = arm_obj
             c.subtarget = handle
             c.chain_count = min(2, len(fc["bones"]))
-            c.use_tail = True
+            # v2.13.0: use_tail=False — цель = ХВОСТ рычага (он на
+            # кончике пальца). Раньше use_tail=True ставил цель в
+            # ГОЛОВУ рычага (2-4 см ДО кончика) — при включении IK
+            # пальцы срывались к рычагу (снап 40-318°, жалоба «кости
+            # проворачиваются наизнанку»)
+            c.use_tail = False
             try:
                 c.use_stretch = False
             except Exception:
                 pass
+            # вращение диска пальца сгибает палец (конец цепи
+            # разворачивается за диском, кончик дожимается позицией)
+            try:
+                c.use_rotation = True
+            except Exception:
+                pass
         except Exception:
             pass
+
+    # -- ограничители IK-суставов (v2.13.0): колени/локти/пальцы
+    # сгибаются только в анатомическую сторону, твист ограничен
+    try:
+        _apply_ik_limits(arm_obj, chains, fchains)
+    except Exception:
+        pass
 
     # -- косметика: формы, цвета, коллекции, видимость
     # пальцы — оранжевые ДИСКИ; остальные суставы — КОЛЬЦА (полый обод,

@@ -1142,14 +1142,20 @@ check("controls: полюс колена у головы голени, смот�
       eb_knee.tail.x > eb_knee.head.x + 0.05,
       (eb_knee.head, eb_knee.tail) if eb_knee else None)
 
-# рычаг ступни: ХВОСТ в голеностопе (голова foot_L)
+# рычаг ступни: ГОЛОВА в голеностопе (голова foot_L) — это точка
+# IK-цели (v2.13.0: use_tail=True тянет конец цепи к ГОЛОВЕ рычага;
+# в 2.12 целью фактически была пятка — нога скручивалась при IK)
 eb_foot = arm.data.edit_bones.get("CTRL_Foot_L")
 eb_foot_b = arm.data.edit_bones.get("foot_L")
-check("controls: хвост CTRL_Foot_L в голеностопе",
+check("controls: голова CTRL_Foot_L в голеностопе (цель IK)",
       eb_foot is not None and eb_foot_b is not None and
-      abs(eb_foot.tail.x - eb_foot_b.head.x) < 1e-6 and
-      abs(eb_foot.tail.z - eb_foot_b.head.z) < 1e-6,
-      (eb_foot.tail, eb_foot_b.head) if eb_foot else None)
+      abs(eb_foot.head.x - eb_foot_b.head.x) < 1e-6 and
+      abs(eb_foot.head.z - eb_foot_b.head.z) < 1e-6,
+      (eb_foot.head, eb_foot_b.head) if eb_foot else None)
+check("controls: хвост CTRL_Foot_L за носком (рукоятка наружу)",
+      eb_foot is not None and eb_foot_b is not None and
+      eb_foot.tail.x > eb_foot_b.tail.x,
+      (eb_foot.tail, eb_foot_b.tail) if eb_foot else None)
 
 eb_pelvis = arm.data.edit_bones.get("pelvis")
 check("controls: pelvis parented to CTRL_Body",
@@ -1233,10 +1239,11 @@ check("controls: head IK -> CTRL_Head (chain 1, без полюса)",
 # пальцы: IK на последнем сегменте цепочки (кончик тянется к рычагу)
 c_fng = [c for c in _pb(arm, "fng_thumb_2_L").constraints
          if c.type == "IK"]
-check("controls: fng_thumb_2_L IK -> CTRL_Finger_thumb_L (chain 2)",
+check("controls: fng_thumb_2_L IK -> CTRL_Finger_thumb_L (chain 2, "
+      "цель = хвост рычага на кончике)",
       len(c_fng) == 1 and c_fng[0].subtarget == "CTRL_Finger_thumb_L" and
       c_fng[0].chain_count == 2 and
-      getattr(c_fng[0], "use_tail", True) is True,
+      getattr(c_fng[0], "use_tail", True) is False,
       [(c.name, c.subtarget) for c in c_fng])
 n_fng_ik = sum(1 for pb in arm.pose.bones
                if pb.name.startswith("fng_") and
@@ -1251,6 +1258,47 @@ n_cons = sum(1 for pb in arm.pose.bones
 check("controls: 25 констрейнтов NCP_* (4 IK на хелперах, 8 CT, "
       "1 IK головы, 10 IK пальцев, 2 ROT)", n_cons == 25, n_cons)
 check("controls: influence = 1 при ik_on=True", nctl.ik_on(arm))
+
+# ------------------------- v2.13.0: цели IK, вращение, лимиты
+c_arm_ik = [c for c in _pb(arm, "NCPK_Arm_L_2").constraints
+            if c.type == "IK"][0]
+c_head_ik = [c for c in _pb(arm, "head").constraints if c.type == "IK"][0]
+c_foot_ik = [c for c in _pb(arm, "NCPK_Foot_L_2").constraints
+             if c.type == "IK"][0]
+check("v2.13.0: use_rotation на IK руки/головы (кольца поворачивают)",
+      getattr(c_arm_ik, "use_rotation", False) is True and
+      getattr(c_head_ik, "use_rotation", False) is True,
+      (getattr(c_arm_ik, "use_rotation", None),
+       getattr(c_head_ik, "use_rotation", None)))
+check("v2.13.0: у ног IK без use_rotation (стопа ведётся COPY_ROTATION)",
+      getattr(c_foot_ik, "use_rotation", False) is False,
+      getattr(c_foot_ik, "use_rotation", None))
+c_fng_ik0 = [c for c in _pb(arm, "fng_thumb_2_L").constraints
+             if c.type == "IK"][0]
+check("v2.13.0: у пальца use_tail=False (цель = хвост диска на кончике)",
+      getattr(c_fng_ik0, "use_tail", True) is False and
+      getattr(c_fng_ik0, "use_rotation", False) is True,
+      (getattr(c_fng_ik0, "use_tail", None),
+       getattr(c_fng_ik0, "use_rotation", None)))
+pb_n2 = _pb(arm, "NCPK_Foot_L_2")
+lim_n2 = [ax for ax in ("x", "y", "z")
+          if getattr(pb_n2, "use_ik_limit_" + ax, False)]
+check("v2.13.0: твист-лимит на хелпере ноги (шарнир — на реальном bpy)",
+      "y" in lim_n2, lim_n2)
+pb_fa = _pb(arm, "NCPK_Arm_L_2")
+check("v2.13.0: твист предплечья замкнут (lock_ik_y — дрейф R-цепей)",
+      getattr(pb_fa, "lock_ik_y", False) is True,
+      getattr(pb_fa, "lock_ik_y", None))
+pb_f0 = _pb(arm, "fng_thumb_1_L")
+check("v2.13.0: твист пальцев замкнут",
+      getattr(pb_f0, "lock_ik_y", False) is True)
+check("v2.13.0: fix_finger_weights безопасен на пустых входах",
+      neuro_rig.fix_finger_weights(None, None) == "" and
+      neuro_rig.fix_finger_weights(mesh_obj=None, arm_obj=arm) == "")
+check("v2.13.0: рычаг ступни направлен от голеностопа ВПЕРЁД "
+      "(голова = цель IK, хвост = рукоятка)",
+      eb_foot.tail.x > eb_foot.head.x + 0.02,
+      (eb_foot.head.x, eb_foot.tail.x))
 
 nctl.set_ik(arm, False)
 check("controls: set_ik(False) гасит influence (IK, CT и полюсы)",
@@ -1625,7 +1673,7 @@ pkg = importlib.util.module_from_spec(spec_imp)
 sys.modules["neuro_character_pipeline"] = pkg
 spec_imp.loader.exec_module(pkg)
 
-check("bl_info version 2.12.0", pkg.bl_info["version"] == (2, 12, 0),
+check("bl_info version 2.13.0", pkg.bl_info["version"] == (2, 13, 0),
       pkg.bl_info["version"])
 check("DRAG-состояние режима рычагов есть",
       hasattr(pkg, "DRAG") and pkg.DRAG.get("on") is False)
@@ -1676,7 +1724,7 @@ check("Body plan enum: AUTO/HUMAN/QUADRUPED/WINGED_QUAD/BIRD/DRAGON",
                       "BIRD", "DRAGON"}, bp_ids)
 with open(os.path.join(ADDON, "blender_manifest.toml"), "rb") as f:
     man = tomllib.load(f)
-check("manifest version 2.12.0", man["version"] == "2.12.0",
+check("manifest version 2.13.0", man["version"] == "2.13.0",
       man["version"])
 with open(os.path.join(ADDON, "INSTALL_RU.txt"), encoding="utf-8") as f:
     install_txt = f.read()
@@ -2126,10 +2174,10 @@ cf = arm_c.data.edit_bones.get("CTRL_Foot_L")
 eb_f3 = arm_c.data.edit_bones.get("foot_L")
 if cf is not None and eb_f3 is not None:
     fpos = np.array([eb_f3.head.x, eb_f3.head.y, eb_f3.head.z])
-    ftail = np.array([cf.tail.x, cf.tail.y, cf.tail.z])
-    check("v2.12.0: цель IK ноги осталась у голеностопа (< 0.01)",
-          float(np.linalg.norm(ftail - fpos)) < 0.01,
-          float(np.linalg.norm(ftail - fpos)))
+    fhead = np.array([cf.head.x, cf.head.y, cf.head.z])
+    check("v2.13.0: цель IK ноги (ГОЛОВА рычага) у голеностопа (< 0.01)",
+          float(np.linalg.norm(fhead - fpos)) < 0.01,
+          float(np.linalg.norm(fhead - fpos)))
 cfarm_pb = arm_c.pose.bones.get("farm_L")
 cik = [c for c in cfarm_pb.constraints if c.type == "IK"] \
     if cfarm_pb is not None else []

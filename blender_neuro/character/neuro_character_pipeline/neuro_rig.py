@@ -14,6 +14,11 @@ import os
 import bpy
 from mathutils import Matrix, Quaternion, Vector
 
+try:
+    import numpy as np
+except Exception:                        # numpy не мешает остальному ригу
+    np = None
+
 
 # --------------------------------------------------------- резервный спек
 
@@ -619,6 +624,237 @@ def skin_mesh_to_armature(mesh, arm_obj):
     arm_obj.select_set(True)
     bpy.context.view_layer.objects.active = arm_obj
     bpy.ops.object.parent_set(type="ARMATURE_AUTO")
+
+
+# ------------------------------------------------- доклей весов пальцев
+
+def _seg_dist_np(pts, a, b):
+    """Расстояния от точек pts (N,3) до отрезка [a, b] (world)."""
+    ab = b - a
+    L2 = float(ab @ ab)
+    if L2 < 1e-12:
+        d = pts - a
+        return np.sqrt(np.einsum("ij,ij->i", d, d)), np.zeros(len(pts))
+    t = np.clip(((pts - a) @ ab) / L2, 0.0, 1.0)
+    proj = a + np.outer(t, ab)
+    d = pts - proj
+    return np.sqrt(np.einsum("ij,ij->i", d, d)), t
+
+
+def _finger_chains_of(arm_obj):
+    """Пальцевые цепочки по дереву костей: [(host_name, [b1, b2]), ...].
+
+    host — кость-родитель корня цепочки (farm_*/hand/крыло)."""
+    chains = []
+    roots = []
+    bones = arm_obj.data.bones
+    for b in bones:
+        if b.name.startswith("fng_") and \
+                (b.parent is None or
+                 not b.parent.name.startswith("fng_")):
+            roots.append(b)
+    for rb in roots:
+        chain = [rb]
+        while True:
+            kids = [k for k in rb.children if k.name.startswith("fng_")]
+            # у корня может быть 5 детей-пальцев — идём по одному:
+            # сама цепочка линейна (root -> seg2)
+            kids = [k for k in chain[-1].children
+                    if k.name.startswith("fng_")]
+            if len(kids) != 1:
+                break
+            chain.append(kids[0])
+        host = rb.parent.name if rb.parent is not None else None
+        chains.append((host, [b.name for b in chain]))
+    return chains
+
+
+def fix_finger_weights(mesh_obj, arm_obj, h_ref=None):
+    """Гарантированный скининг пальцев (v2.13.0) — ГЛАВНЫЙ фикс итерации.
+
+    Автовеса Blender (bone heat) на мешах Image-to-3D регулярно
+    отдают вершины пальцев кости предплечья/кисти: кости пальцев
+    «не попали в меш» (главный баг 2.12 — пальцы не сгибаются,
+    вращение дисков ничего не делает). Здесь привязка правится
+    ПО ГЕОМЕТРИИ, детерминированно: вершина, которая ближе к
+    пальцевой цепочке, чем к кости-хозяину (farm/hand/крыло),
+    перепривязывается к этой цепочке; вес делится между сегментами
+    пальца по проекции вдоль цепочки (с плавной зоной у сустава).
+
+    Работает для любого плана (human fng_*, creature fng_*_std_*).
+    Возвращает строку отчёта («пальцы: перенесено N вершин» или "")."""
+    if np is None or mesh_obj is None or arm_obj is None:
+        return ""
+    try:
+        chains = _finger_chains_of(arm_obj)
+        chains = [(host, names) for host, names in chains
+                  if host and arm_obj.data.bones.get(host) is not None
+                  and all(arm_obj.data.bones.get(n) is not None
+                          for n in names)]
+        if not chains:
+            return ""
+        me = mesh_obj.data
+        mw = mesh_obj.matrix_world
+        amw = arm_obj.matrix_world
+        n_v = len(me.vertices)
+        if n_v == 0:
+            return ""
+        # мировые координаты вершин
+        co = np.empty((n_v, 3), dtype=np.float64)
+        me.vertices.foreach_get("co", np.ravel(co))
+        co = co.reshape(n_v, 3)
+        mw3 = [list(mw.row[i])[:3] for i in range(3)]
+        co = co @ np.array(mw3, dtype=np.float64).T + \
+            np.array(mw.translation, dtype=np.float64)
+        if h_ref is None:
+            h_ref = float(arm_obj.get("ncp_height", 0.0) or 0.0) or 1.70
+        # сегменты цепочек и хозяина в мировом пространстве
+        def seg_pts(bone_name):
+            b = arm_obj.data.bones[bone_name]
+            m = amw @ b.matrix_local
+            a = m.to_translation()
+            t = m @ Vector((0.0, float(b.length), 0.0))
+            return (np.array([a.x, a.y, a.z], dtype=np.float64),
+                    np.array([t.x, t.y, t.z], dtype=np.float64))
+
+        host_segs = {}
+        chain_segs = []
+        for host, names in chains:
+            if host not in host_segs:
+                host_segs[host] = seg_pts(host)
+            segs = [seg_pts(n) for n in names]
+            L = [float(np.linalg.norm(s[1] - s[0])) for s in segs]
+            chain_segs.append((host, names, segs, L))
+
+        d_host_best = np.full(n_v, np.inf)
+        for host, seg in host_segs.items():
+            d, _t = _seg_dist_np(co, seg[0], seg[1])
+            d_host_best = np.minimum(d_host_best, d)
+
+        # ближайшая цепочка пальца для каждой вершины
+        best_d = np.full(n_v, np.inf)
+        best_c = np.full(n_v, -1, dtype=np.int64)
+        best_t = np.zeros(n_v)
+        for ci, (host, names, segs, L) in enumerate(chain_segs):
+            # расстояние до полилинии цепочки + доля вдоль неё
+            d_min = np.full(n_v, np.inf)
+            s_acc = np.zeros(n_v)
+            s_run = 0.0
+            total = sum(L)
+            t_glob = np.zeros(n_v)
+            for si, (a, b) in enumerate(segs):
+                d, t = _seg_dist_np(co, a, b)
+                cur = d < d_min
+                t_glob[cur] = (s_run + t[cur] * L[si]) / max(total, 1e-9)
+                d_min = np.where(cur, d, d_min)
+                s_run += L[si]
+            upd = d_min < best_d
+            best_d[upd] = d_min[upd]
+            best_c[upd] = ci
+            best_t[upd] = t_glob[upd]
+
+        # зона кисти/пальцев: не дальше 0.12*h от хозяина или пальца
+        r_zone = 0.12 * max(h_ref, 1e-6)
+        take = (best_c >= 0) & (best_d < d_host_best) & \
+            (np.minimum(best_d, d_host_best) < r_zone)
+        idxs = np.nonzero(take)[0]
+        if len(idxs) == 0:
+            return ""
+        # группы вершин (создать при отсутствии)
+        vgs = mesh_obj.vertex_groups
+        need = set()
+        for host, names, _segs, _L in chain_segs:
+            need.add(host)
+            need.update(names)
+        for nm in need:
+            if vgs.get(nm) is None:
+                vgs.new(nm)
+        gid = {nm: vgs[nm].index for nm in need}
+        n_done = 0
+        per_chain = {}
+        for vi in idxs:
+            ci = int(best_c[vi])
+            host, names, segs, L = chain_segs[ci]
+            vi = int(vi)
+            v = me.vertices[vi]
+            u = float(best_t[vi])
+            # стык сегментов: перетекание веса у сустава пальца
+            u_j = L[0] / max(sum(L), 1e-9)
+            w2 = min(max((u - (u_j * 0.6)) / max(u_j * 0.8, 1e-9),
+                         0.0), 1.0)
+            w1 = 1.0 - w2
+            if len(names) == 1:
+                w1, w2 = 1.0, 0.0
+            try:
+                # снять ВСЕ группы у вершины (VertexGroup.remove)
+                for g in list(v.groups):
+                    try:
+                        vgs[g.group].remove([vi])
+                    except Exception:
+                        pass
+                if w1 > 0.001:
+                    vgs[gid[names[0]]].add([vi], w1, "REPLACE")
+                if len(names) > 1 and w2 > 0.001:
+                    vgs[gid[names[1]]].add([vi], w2, "REPLACE")
+            except Exception:
+                continue
+            n_done += 1
+            per_chain[ci] = per_chain.get(ci, 0) + 1
+        top = sorted(per_chain.items(), key=lambda kv: -kv[1])[:4]
+        det = ", ".join("%s:%d" % (chain_segs[ci][1][0][4:], n)
+                        for ci, n in top)
+        return "пальцы на меш: %d вершин (%s)" % (n_done, det)
+    except Exception as e:
+        return ""
+
+
+def check_bone_placement(arm_obj, mesh_obj, h_ref=None):
+    """Проверка «кости на меше» (v2.13.0): кости пальцев должны стоять
+    на реальных пальцах меша, кости рук/ног — на уровне поверхности.
+
+    Считается расстояние середины каждой остовной кости до ближайшей
+    точки поверхности меша (closest_point_on_mesh, мировые координаты).
+    Возвращает короткую строку («пальцы ≤0.6 см, конечности ≤1.2 см»)
+    или "" — вызывается после сборки, результат идёт в статус."""
+    if mesh_obj is None or arm_obj is None:
+        return ""
+    try:
+        if h_ref is None:
+            h_ref = float(arm_obj.get("ncp_height", 0.0) or 0.0) or 1.70
+        mw = mesh_obj.matrix_world
+        mw_inv = mw.inverted()
+        amw = arm_obj.matrix_world
+        worst_f = 0.0
+        worst_l = 0.0
+        for b in arm_obj.data.bones:
+            nm = b.name
+            is_fng = nm.startswith("fng_")
+            if not (is_fng or nm.startswith(("uarm_", "farm_", "thigh_",
+                                             "shin_", "wing"))):
+                continue
+            if not getattr(b, "use_deform", True):
+                continue
+            m = amw @ b.matrix_local
+            mid = m @ Vector((0.0, float(b.length) * 0.5, 0.0))
+            loc_p = mw_inv @ mid
+            res, loc, _nrm, _idx = mesh_obj.closest_point_on_mesh(loc_p)
+            if not res:
+                continue
+            dist = float((Vector(loc) - loc_p).length)
+            if is_fng:
+                worst_f = max(worst_f, dist)
+            else:
+                worst_l = max(worst_l, dist)
+        out = []
+        if worst_f > 0.0:
+            out.append("пальцы %s%.1f см" %
+                       ("" if worst_f <= 0.03 * h_ref else "ВНЕ меша ",
+                        worst_f * 100.0))
+        if worst_l > 0.0:
+            out.append("конечности %.1f см" % (worst_l * 100.0))
+        return ", ".join(out)
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------- мир
